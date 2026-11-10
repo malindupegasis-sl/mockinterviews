@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { loadVoiceChoice, type VoiceName } from "@/lib/speech/voices";
-import { LIMITS, type InterviewConfig, type InterviewMode } from "@/lib/types";
+import { LIMITS, type Difficulty, type InterviewConfig, type InterviewMode } from "@/lib/types";
 import Oscilloscope from "./Oscilloscope";
 import VoicePicker from "./VoicePicker";
 
@@ -17,6 +17,12 @@ const CV_PLACEHOLDER = `Optional. Paste your CV or a summary of your experience.
 const MODES: { value: InterviewMode; title: string; blurb: string }[] = [
   { value: "full", title: "Full interview", blurb: "Uninterrupted. Full report at the end." },
   { value: "practice", title: "Practice", blurb: "Feedback after each question. Retry as needed." },
+];
+
+const DIFFICULTIES: { value: Difficulty; title: string; blurb: string }[] = [
+  { value: "easy", title: "Easy", blurb: "No follow-ups." },
+  { value: "medium", title: "Medium", blurb: "One follow-up per question." },
+  { value: "hard", title: "Hard", blurb: "Up to two follow-ups. Tougher, stricter scoring." },
 ];
 
 const label = "text-[10px] uppercase tracking-[0.3em] text-neutral-500";
@@ -34,6 +40,7 @@ export default function SetupForm({
   const [cv, setCv] = useState(initial?.cv ?? "");
   const [numQuestions, setNumQuestions] = useState(initial?.numQuestions ?? LIMITS.defaultQuestions);
   const [mode, setMode] = useState<InterviewMode>(initial?.mode ?? "full");
+  const [difficulty, setDifficulty] = useState<Difficulty>(initial?.difficulty ?? "medium");
   const [voice, setVoice] = useState<VoiceName>(() => loadVoiceChoice());
 
   const trimmed = context.trim();
@@ -55,7 +62,7 @@ export default function SetupForm({
         className="mx-auto flex w-full max-w-2xl flex-1 flex-col gap-8 px-5 pb-12 pt-4"
         onSubmit={(e) => {
           e.preventDefault();
-          if (valid) onStart({ context: trimmed, cv: cv.trim(), numQuestions, mode });
+          if (valid) onStart({ context: trimmed, cv: cv.trim(), numQuestions, mode, difficulty });
         }}
       >
         <header className="space-y-3">
@@ -93,32 +100,8 @@ export default function SetupForm({
           <Counter hint="Used privately for follow-ups and feedback" n={cv.length} max={LIMITS.cvMaxChars} />
         </label>
 
-        <fieldset className="flex flex-col gap-3">
-          <legend className={`${label} mb-3`}>Mode</legend>
-          <div className="grid gap-3 sm:grid-cols-2">
-            {MODES.map((m) => (
-              <label
-                key={m.value}
-                className={`cursor-pointer border px-4 py-3 transition-colors ${
-                  mode === m.value ? "border-signal/70" : "border-neutral-800 hover:border-neutral-600"
-                }`}
-              >
-                <input
-                  type="radio"
-                  name="mode"
-                  value={m.value}
-                  checked={mode === m.value}
-                  onChange={() => setMode(m.value)}
-                  className="sr-only"
-                />
-                <span className={`block text-xs uppercase tracking-[0.25em] ${mode === m.value ? "text-signal" : "text-neutral-300"}`}>
-                  {m.title}
-                </span>
-                <span className="mt-1 block text-xs text-neutral-500">{m.blurb}</span>
-              </label>
-            ))}
-          </div>
-        </fieldset>
+        <Choice legend="Mode" name="mode" options={MODES} value={mode} onChange={setMode} />
+        <Choice legend="Difficulty" name="difficulty" options={DIFFICULTIES} value={difficulty} onChange={setDifficulty} cols={3} />
 
         <div className="flex flex-wrap items-center gap-x-10 gap-y-5">
           <label className="flex items-center gap-4">
@@ -155,5 +138,50 @@ function Counter({ hint, n, max }: { hint: string; n: number; max: number }) {
         {n}/{max}
       </span>
     </span>
+  );
+}
+
+function Choice<T extends string>({
+  legend,
+  name,
+  options,
+  value,
+  onChange,
+  cols = 2,
+}: {
+  legend: string;
+  name: string;
+  options: { value: T; title: string; blurb: string }[];
+  value: T;
+  onChange: (v: T) => void;
+  cols?: 2 | 3;
+}) {
+  return (
+    <fieldset className="flex flex-col gap-3">
+      <legend className={`${label} mb-3`}>{legend}</legend>
+      <div className={`grid gap-3 ${cols === 3 ? "sm:grid-cols-3" : "sm:grid-cols-2"}`}>
+        {options.map((o) => (
+          <label
+            key={o.value}
+            className={`cursor-pointer border px-4 py-3 transition-colors has-[:focus-visible]:border-signal ${
+              value === o.value ? "border-signal/70" : "border-neutral-800 hover:border-neutral-600"
+            }`}
+          >
+            <input
+              type="radio"
+              name={name}
+              value={o.value}
+              checked={value === o.value}
+              onChange={() => onChange(o.value)}
+              className="sr-only"
+            />
+            <span className={`block text-xs uppercase tracking-[0.25em] ${value === o.value ? "text-signal" : "text-neutral-300"}`}>
+              {o.title}
+            </span>
+            <span className="mt-1 block text-xs text-neutral-500">{o.blurb}</span>
+          </label>
+        ))}
+      </div>
+    </fieldset>
   );
 }

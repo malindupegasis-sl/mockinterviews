@@ -1,7 +1,6 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { stripCompletionToken } from "@/lib/completion";
 import { fetchQuestionFeedback, visibleTurns } from "@/lib/feedbackClient";
 import { streamInterviewerTurn } from "@/lib/interviewClient";
 import { SentenceSplitter } from "@/lib/sentences";
@@ -11,6 +10,7 @@ import { loadVoiceChoice, type VoiceName } from "@/lib/speech/voices";
 import type { ChatMessage, Control, InterviewConfig, QuestionFeedback } from "@/lib/types";
 import { LIMITS } from "@/lib/types";
 import { MicAmplitude } from "@/lib/viz/amplitude";
+import DebugStrip from "./DebugStrip";
 import MicButton from "./MicButton";
 import Oscilloscope, { type TraceMode } from "./Oscilloscope";
 import QuestionFeedbackCard from "./QuestionFeedbackCard";
@@ -23,14 +23,33 @@ import VoicePicker from "./VoicePicker";
  */
 type Turn = "interviewer" | "candidate" | "review" | "complete" | "error";
 
-/** One attempt at one main question (practice mode). */
+/** One attempt at one main question, derived from the server's turn metadata. */
 interface Attempt {
   question: number;
   attempt: number;
-  start: number; // index in messages of the interviewer turn that asks the question
-  end?: number; // index of the interviewer turn carrying [QUESTION_COMPLETE] (exclusive)
+  start: number; // index of the interviewer turn that asks the question
+  end?: number; // index of the turn that finished it (ack / closing / next question), exclusive
+}
+
+/** Splits the conversation into question attempts using the server-issued turn kinds. */
+function deriveAttempts(messages: ChatMessage[]): Attempt[] {
+  const attempts: Attempt[] = [];
+  messages.forEach((m, i) => {
+    const kind = m.meta?.kind;
+    if (!kind || kind === "follow_up") return;
+    const open = attempts[attempts.length - 1];
+    if (open && open.end === undefined) open.end = i; // any question / ack / closing ends the open attempt
+    if (kind === "question") {
+      const q = m.meta!.question;
+      attempts.push({ question: q, attempt: attempts.filter((a) => a.question === q).length + 1, start: i });
+    }
+  });
+  return attempts;
+}
+
+interface FeedbackState {
   feedback?: QuestionFeedback;
-  feedbackError?: string;
+  error?: string;
 }
 
 /** What the report screen needs once the interview is over. */
@@ -63,7 +82,7 @@ export default function InterviewScreen({
   const [showTranscript, setShowTranscript] = useState(false);
   const [typingOpen, setTypingOpen] = useState(false);
   const [typed] = useState(() => new Map<number, number>()); // typewriter progress per line
-  const [attempts, setAttemptsState] = useState<Attempt[]>([]);
+  const [feedbacks, setFeedbacks] = useState<Record<number, FeedbackState>>({}); // keyed by attempt start
 
   const stt = useSpeechRecognition();
   const speakerRef = useRef<Speaker | null>(null);
@@ -71,45 +90,42 @@ export default function InterviewScreen({
   const abortRef = useRef<AbortController | null>(null);
   const feedbackAbortRef = useRef<AbortController | null>(null);
   const skippedRef = useRef(false); // user interrupted the current interviewer turn
-  // Mirror of `attempts` for use inside async callbacks.
-  const attemptsRef = useRef<Attempt[]>([]);
-  const setAttempts = useCallback((update: (prev: Attempt[]) => Attempt[]) => {
-    attemptsRef.current = update(attemptsRef.current);
-    setAttemptsState(attemptsRef.current);
-  }, []);
 
-  /** Practice mode: get feedback on one attempt (runs while the interviewer says "Thank you."). */
+  const attempts = deriveAttempts(messages);
+  const currentAttempt = attempts[attempts.length - 1];
+  const lastMeta = [...messages].reverse().find((m) => m.meta)?.meta;
+
+  /** Practice mode: feedback on one attempt (starts while the interviewer says "Thank you."). */
   const loadFeedback = useCallback(
-    async (index: number, allMessages: ChatMessage[]) => {
-      const a = attemptsRef.current[index];
-      if (!a || a.end === undefined) return;
+    async (attempt: Attempt, allMessages: ChatMessage[]) => {
+      if (attempt.end === undefined) return;
       feedbackAbortRef.current?.abort();
       const controller = new AbortController();
       feedbackAbortRef.current = controller;
-      setAttempts((prev) =>
-        prev.map((x, i) => (i === index ? { ...x, feedback: undefined, feedbackError: undefined } : x)),
-      );
+      setFeedbacks((prev) => ({ ...prev, [attempt.start]: {} }));
       try {
         const feedback = await fetchQuestionFeedback(
-          { context: config.context, cv: config.cv, transcript: visibleTurns(allMessages.slice(a.start, a.end)) },
+          {
+            context: config.context,
+            cv: config.cv,
+            difficulty: config.difficulty,
+            transcript: visibleTurns(allMessages.slice(attempt.start, attempt.end)),
+          },
           controller.signal,
         );
-        setAttempts((prev) => prev.map((x, i) => (i === index ? { ...x, feedback } : x)));
+        setFeedbacks((prev) => ({ ...prev, [attempt.start]: { feedback } }));
       } catch (err) {
         if (controller.signal.aborted) return;
-        const feedbackError = err instanceof Error ? err.message : "Couldn't get feedback.";
-        setAttempts((prev) => prev.map((x, i) => (i === index ? { ...x, feedbackError } : x)));
+        const error = err instanceof Error ? err.message : "Couldn't get feedback.";
+        setFeedbacks((prev) => ({ ...prev, [attempt.start]: { error } }));
       }
     },
-    [config.context, config.cv, setAttempts],
+    [config.context, config.cv, config.difficulty],
   );
 
-  /**
-   * Requests the interviewer's next turn and speaks it sentence by sentence as it streams.
-   * `startsAttempt` marks the reply as the start of a (practice) question attempt.
-   */
+  /** Asks the server for the next interviewer turn and speaks it sentence by sentence as it streams. */
   const requestTurn = useCallback(
-    async (history: ChatMessage[], startsAttempt?: { question: number; attempt: number }) => {
+    async (history: ChatMessage[]) => {
       const speaker = speakerRef.current;
       if (!speaker) return;
       abortRef.current?.abort();
@@ -126,49 +142,40 @@ export default function InterviewScreen({
       setStreamingText("");
 
       try {
-        const raw = await streamInterviewerTurn(
+        const { text, meta } = await streamInterviewerTurn(
           {
             context: config.context,
             cv: config.cv,
             numQuestions: config.numQuestions,
             mode: config.mode,
+            difficulty: config.difficulty,
             messages: history,
           },
           (soFar) => {
-            const visible = stripCompletionToken(soFar).text;
-            setStreamingText(visible);
-            for (const sentence of splitter.push(visible)) {
+            setStreamingText(soFar);
+            for (const sentence of splitter.push(soFar)) {
               if (!skippedRef.current) speaker.enqueue(sentence);
             }
           },
           controller.signal,
         );
-        const { text, complete, questionComplete } = stripCompletionToken(raw);
         for (const sentence of splitter.flush(text)) {
           if (!skippedRef.current) speaker.enqueue(sentence);
         }
-        const index = history.length; // position of this interviewer turn
-        // Keep the raw text (tokens included) in history so the interviewer sees its own
-        // earlier tokens and stays consistent; tokens are stripped wherever text is shown.
-        const all: ChatMessage[] = [...history, { role: "assistant", content: raw.trim() || "Thank you." }];
+        const all: ChatMessage[] = [...history, { role: "assistant", content: text, meta }];
         setMessages(all);
         setStreamingText("");
 
-        if (practice && startsAttempt) {
-          setAttempts((prev) => [...prev, { ...startsAttempt, start: index }]);
-        }
-        // Close the open attempt when the question (or the whole interview) ends.
-        const last = attemptsRef.current.length - 1;
-        const closesAttempt = practice && last >= 0 && attemptsRef.current[last].end === undefined;
-        if (closesAttempt && (questionComplete || complete)) {
-          setAttempts((prev) => prev.map((x, i) => (i === last ? { ...x, end: index } : x)));
-          if (questionComplete && !complete) void loadFeedback(last, all);
+        // Practice mode: the server finished a question, so fetch feedback on that attempt now.
+        if (practice && meta.kind === "ack") {
+          const finished = deriveAttempts(all).find((a) => a.end === history.length);
+          if (finished) void loadFeedback(finished, all);
         }
 
         // Only hand the turn over (and allow the mic) once the interviewer has finished speaking.
         await speaker.waitUntilIdle();
         if (controller.signal.aborted) return;
-        setTurn(complete ? "complete" : practice && questionComplete ? "review" : "candidate");
+        setTurn(meta.kind === "closing" ? "complete" : meta.kind === "ack" ? "review" : "candidate");
       } catch (err) {
         if (controller.signal.aborted) return;
         speaker.stop();
@@ -177,7 +184,7 @@ export default function InterviewScreen({
         setTurn("error");
       }
     },
-    [config.context, config.cv, config.numQuestions, config.mode, practice, setAttempts, loadFeedback],
+    [config.context, config.cv, config.numQuestions, config.mode, config.difficulty, practice, loadFeedback],
   );
 
   // Set up audio and start the interview. Cleanup fully tears down, so React
@@ -190,13 +197,12 @@ export default function InterviewScreen({
     speakerRef.current = speaker;
     const mic = new MicAmplitude();
     micRef.current = mic;
-    attemptsRef.current = [];
 
     let cancelled = false;
     speaker.init().then((mode) => {
       if (cancelled) return;
       setVoiceMode(mode);
-      requestTurn([], { question: 1, attempt: 1 });
+      requestTurn([]);
     });
 
     return () => {
@@ -230,32 +236,16 @@ export default function InterviewScreen({
     [messages, requestTurn, turn],
   );
 
-  /** Practice mode: send a control turn (next / retry / finish) to the interviewer. */
+  /** Practice mode: Next / Retry. The server decides what that means for the interview. */
   const sendControl = useCallback(
-    (control: Control, startsAttempt?: { question: number; attempt: number }) => {
+    (control: Control) => {
       feedbackAbortRef.current?.abort();
       const history: ChatMessage[] = [...messages, { role: "user", content: "", control }];
       setMessages(history);
-      requestTurn(history, startsAttempt);
+      requestTurn(history);
     },
     [messages, requestTurn],
   );
-
-  const currentAttempt = attempts[attempts.length - 1];
-
-  const retryQuestion = () => {
-    if (!currentAttempt) return;
-    const q = currentAttempt.question;
-    const n = Math.max(...attempts.filter((a) => a.question === q).map((a) => a.attempt)) + 1;
-    sendControl({ type: "retry", question: q }, { question: q, attempt: n });
-  };
-
-  const nextQuestion = () => {
-    if (!currentAttempt) return;
-    const q = currentAttempt.question;
-    if (q >= config.numQuestions) sendControl({ type: "finish", question: q });
-    else sendControl({ type: "next", question: q + 1 }, { question: q + 1, attempt: 1 });
-  };
 
   /** Transcript for the full report: everything (full mode), or the final attempt per question (practice). */
   const finish = () => {
@@ -312,29 +302,14 @@ export default function InterviewScreen({
     return () => window.removeEventListener("keydown", onKey);
   }, [stt.supported, toggleMic, skip, turn, speaking]);
 
-  /** Retry after an error: re-send the transcript as it stands. */
-  const retry = () => {
-    const last = messages[messages.length - 1];
-    // If the failed request was a control turn that starts an attempt, start it again.
-    const starts =
-      last?.control && last.control.type !== "finish"
-        ? {
-            question: last.control.question,
-            attempt:
-              last.control.type === "retry"
-                ? Math.max(0, ...attempts.filter((a) => a.question === last.control!.question).map((a) => a.attempt)) + 1
-                : 1,
-          }
-        : messages.length === 0
-          ? { question: 1, attempt: 1 }
-          : undefined;
-    requestTurn(messages, starts);
-  };
+  /** Retry after an error: re-send the conversation as it stands (the server re-plans the turn). */
+  const retry = () => requestTurn(messages);
 
   // ---- Derived view state ----
   const canAnswer = turn === "candidate" && !processing;
   const textOpen = typingOpen || !stt.supported;
-  const reviewing = turn === "review" && !currentAttempt?.feedback && !currentAttempt?.feedbackError;
+  const currentFeedback = currentAttempt ? feedbacks[currentAttempt.start] : undefined;
+  const reviewing = turn === "review" && !currentFeedback?.feedback && !currentFeedback?.error;
   const showCard = turn === "review" && !reviewing;
 
   const status =
@@ -401,7 +376,7 @@ export default function InterviewScreen({
     const multiple = a && attempts.some((x) => x.question === a.question && x.attempt > 1);
     transcriptLines.push({
       role: m.role,
-      content: m.role === "assistant" ? stripCompletionToken(m.content).text || "Thank you." : m.content,
+      content: m.content,
       label: a ? `Question ${a.question}${multiple ? ` · Attempt ${a.attempt}` : ""}` : undefined,
     });
   });
@@ -412,7 +387,10 @@ export default function InterviewScreen({
       {/* Top bar: minimal chrome */}
       <header className="flex items-center justify-between gap-4 px-5 py-4 text-[10px] uppercase tracking-[0.3em] text-neutral-600">
         <span className="hidden sm:inline">
-          Mock interview{practice && <span className="text-neutral-700"> · Practice</span>}
+          Mock interview
+          <span className="text-neutral-700">
+            {practice && " · Practice"} · {config.difficulty}
+          </span>
         </span>
         <div className="ml-auto flex items-center gap-5 normal-case tracking-normal">
           {voiceMode === "browser" && (
@@ -461,12 +439,12 @@ export default function InterviewScreen({
             <QuestionFeedbackCard
               question={currentAttempt.question}
               attempt={currentAttempt.attempt}
-              feedback={currentAttempt.feedback}
-              error={currentAttempt.feedbackError}
+              feedback={currentFeedback?.feedback}
+              error={currentFeedback?.error}
               isLast={currentAttempt.question >= config.numQuestions}
-              onRetry={retryQuestion}
-              onNext={nextQuestion}
-              onReload={() => void loadFeedback(attempts.length - 1, messages)}
+              onRetry={() => sendControl("retry")}
+              onNext={() => sendControl("next")}
+              onReload={() => void loadFeedback(currentAttempt, messages)}
             />
           </div>
         ) : (
@@ -598,6 +576,8 @@ export default function InterviewScreen({
           </button>
         </div>
       </section>
+
+      <DebugStrip difficulty={config.difficulty} total={config.numQuestions} meta={lastMeta} />
 
       {showTranscript && (
         <aside className="max-h-[38vh] overflow-y-auto border-t border-neutral-900 px-5 py-5">

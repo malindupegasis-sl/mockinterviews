@@ -1,15 +1,15 @@
-import type { InterviewRequest } from "./types";
+import type { InterviewEvent, InterviewRequest, TurnMeta } from "./types";
 
 /**
- * Calls /api/interview and streams the interviewer's reply.
- * `onText` receives the full text accumulated so far after every chunk.
- * Resolves with the complete raw text (completion token included, if any).
+ * Calls /api/interview and streams the interviewer's reply (newline-delimited JSON).
+ * `onText` receives the full spoken text accumulated so far after every chunk.
+ * Resolves with the final text and the server's metadata for the turn.
  */
 export async function streamInterviewerTurn(
   req: InterviewRequest,
   onText: (soFar: string) => void,
   signal?: AbortSignal,
-): Promise<string> {
+): Promise<{ text: string; meta: TurnMeta }> {
   const res = await fetch("/api/interview", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -30,14 +30,35 @@ export async function streamInterviewerTurn(
 
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
+  let buffer = "";
   let text = "";
+  let done: Extract<InterviewEvent, { type: "done" }> | null = null;
+
+  const handle = (raw: string) => {
+    if (!raw.trim()) return;
+    const event = JSON.parse(raw) as InterviewEvent;
+    if (event.type === "text") {
+      text += event.text;
+      onText(text);
+    } else if (event.type === "done") {
+      done = event;
+    }
+  };
+
   while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    text += decoder.decode(value, { stream: true });
-    onText(text);
+    const { done: finished, value } = await reader.read();
+    if (finished) break;
+    buffer += decoder.decode(value, { stream: true });
+    let nl: number;
+    while ((nl = buffer.indexOf("\n")) >= 0) {
+      handle(buffer.slice(0, nl));
+      buffer = buffer.slice(nl + 1);
+    }
   }
-  text += decoder.decode();
-  if (!text.trim()) throw new Error("The interviewer returned an empty response.");
-  return text;
+  handle(buffer + decoder.decode());
+
+  const final = done as Extract<InterviewEvent, { type: "done" }> | null;
+  if (!final) throw new Error("The interviewer's reply was cut off. Try again.");
+  if (!final.text.trim()) throw new Error("The interviewer returned an empty response.");
+  return { text: final.text, meta: final.meta };
 }

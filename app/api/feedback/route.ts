@@ -1,8 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
-import { jsonSchemaOutputFormat } from "@anthropic-ai/sdk/helpers/json-schema";
 import { anthropic, MODEL } from "@/lib/anthropic";
-import { FULL_FEEDBACK_SYSTEM_PROMPT, QUESTION_FEEDBACK_SYSTEM_PROMPT } from "@/lib/prompts";
-import { LIMITS, type FullReport, type QuestionFeedback, type Role } from "@/lib/types";
+import { fullFeedbackSystemPrompt, questionFeedbackSystemPrompt } from "@/lib/prompts";
+import { LIMITS, type Difficulty, type FullReport, type QuestionFeedback, type Role } from "@/lib/types";
 
 // Feedback runs at higher effort than the interviewer: quality over speed.
 export const maxDuration = 120;
@@ -10,14 +9,44 @@ export const maxDuration = 120;
 const str = { type: "string" } as const;
 const int = { type: "integer" } as const;
 
-const QUESTION_SCHEMA = {
+/** Calls the model with a JSON-schema-constrained output and parses it ourselves, so a cut-off
+ * or refused response is reported by its real stop reason instead of a parse exception. */
+async function callStructured(
+  system: string,
+  input: string,
+  schema: Record<string, unknown>,
+  signal: AbortSignal,
+): Promise<{ data: unknown; res: Anthropic.Message }> {
+  const res = await anthropic.messages.create(
+    {
+      model: MODEL,
+      max_tokens: 16000,
+      system,
+      messages: [{ role: "user", content: input }],
+      output_config: { effort: "high", format: { type: "json_schema", schema } },
+    },
+    { signal }, // stop the model call if the user navigates away
+  );
+  let data: unknown = null;
+  if (res.stop_reason === "end_turn") {
+    const text = res.content.map((b) => (b.type === "text" ? b.text : "")).join("");
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = null;
+    }
+  }
+  return { data, res };
+}
+
+const QUESTION_SCHEMA: Record<string, unknown> = {
   type: "object",
   properties: { score: int, what_worked: str, biggest_weakness: str, stronger_answer: str, rewrite: str },
   required: ["score", "what_worked", "biggest_weakness", "stronger_answer", "rewrite"],
   additionalProperties: false,
-} as const;
+};
 
-const FULL_SCHEMA = {
+const FULL_SCHEMA: Record<string, unknown> = {
   type: "object",
   properties: {
     overall_score: int,
@@ -56,7 +85,7 @@ const FULL_SCHEMA = {
   },
   required: ["overall_score", "verdict", "questions", "weakest_answer", "patterns"],
   additionalProperties: false,
-} as const;
+};
 
 function bad(message: string, status = 400) {
   return Response.json({ error: message }, { status });
@@ -88,8 +117,11 @@ function buildInput(opts: {
 
 /**
  * POST /api/feedback
- * Body: { kind: "question" | "full", context, cv?, transcript, practice? }
+ * Body: { kind: "question" | "full", context, cv?, difficulty?, transcript, practice? }
  * Returns QuestionFeedback or FullReport as JSON.
+ *
+ * Every request logs one "[feedback]" line to the server terminal: how long it
+ * took and the token usage on success, or the reason on failure.
  */
 export async function POST(req: Request) {
   let body: Record<string, unknown>;
@@ -98,12 +130,13 @@ export async function POST(req: Request) {
   } catch {
     return bad("Invalid JSON body.");
   }
-  const { kind, context, cv = "", transcript, practice = false } = body ?? {};
+  const { kind, context, cv = "", difficulty = "medium", transcript, practice = false } = body ?? {};
 
   if (kind !== "question" && kind !== "full") return bad("Invalid kind.");
   if (typeof context !== "string" || !context.trim() || context.length > LIMITS.contextMaxChars)
     return bad("Invalid context.");
   if (typeof cv !== "string" || cv.length > LIMITS.cvMaxChars) return bad("Invalid background.");
+  if (!["easy", "medium", "hard"].includes(difficulty as string)) return bad("Invalid difficulty.");
   if (
     !Array.isArray(transcript) ||
     transcript.length === 0 ||
@@ -119,38 +152,33 @@ export async function POST(req: Request) {
     return bad("Invalid transcript.");
   if (!transcript.some((t) => t.role === "user")) return bad("There are no answers to review yet.");
 
+  const level = difficulty as Difficulty;
   const input = buildInput({ context, cv, transcript, practice: Boolean(practice) });
+  const label = kind === "full" ? "full report" : "question feedback";
+  const started = Date.now();
+  const secs = () => ((Date.now() - started) / 1000).toFixed(1) + "s";
+  console.info(`[feedback] ${label}: reviewing ${transcript.length} turns (${level})…`);
 
   try {
     if (kind === "question") {
-      const res = await anthropic.messages.parse({
-        model: MODEL,
-        max_tokens: 16000,
-        system: QUESTION_FEEDBACK_SYSTEM_PROMPT,
-        messages: [{ role: "user", content: input }],
-        output_config: { effort: "high", format: jsonSchemaOutputFormat(QUESTION_SCHEMA) },
-      }, { signal: req.signal }); // stop the model call if the user navigates away
-      const out = res.parsed_output;
-      if (res.stop_reason !== "end_turn" || !out) {
-        console.error("[feedback] unusable response:", res.stop_reason, res.stop_details);
+      const { data, res } = await callStructured(questionFeedbackSystemPrompt(level), input, QUESTION_SCHEMA, req.signal);
+      const out = data as QuestionFeedback | null;
+      if (!out) {
+        logUnusable(label, secs(), res.stop_reason, res.stop_details);
         return bad("Couldn't produce feedback for that answer. Try again.", 502);
       }
+      logOk(label, secs(), res.usage);
       const fb: QuestionFeedback = { ...out, score: clamp(out.score, 1, 5) };
       return Response.json(fb);
     }
 
-    const res = await anthropic.messages.parse({
-      model: MODEL,
-      max_tokens: 16000,
-      system: FULL_FEEDBACK_SYSTEM_PROMPT,
-      messages: [{ role: "user", content: input }],
-      output_config: { effort: "high", format: jsonSchemaOutputFormat(FULL_SCHEMA) },
-    }, { signal: req.signal });
-    const out = res.parsed_output;
-    if (res.stop_reason !== "end_turn" || !out || out.questions.length === 0) {
-      console.error("[feedback] unusable response:", res.stop_reason, res.stop_details);
+    const { data, res } = await callStructured(fullFeedbackSystemPrompt(level), input, FULL_SCHEMA, req.signal);
+    const out = data as FullReport | null;
+    if (!out || !Array.isArray(out.questions) || out.questions.length === 0) {
+      logUnusable(label, secs(), res.stop_reason, res.stop_details, out ? "no questions in output" : undefined);
       return bad("Couldn't produce the report. Try again.", 502);
     }
+    logOk(label, secs(), res.usage);
 
     // Keep only references to real candidate turns, and clamp scores.
     const isCandidateTurn = (n: number) => transcript[n - 1]?.role === "user";
@@ -170,8 +198,33 @@ export async function POST(req: Request) {
     };
     return Response.json(report);
   } catch (err) {
-    console.error("[feedback] Anthropic request failed:", err);
-    const status = err instanceof Anthropic.APIError && err.status && err.status < 500 ? err.status : 502;
-    return bad("Feedback is unavailable right now. Please try again.", status);
+    if (req.signal.aborted) {
+      console.info(`[feedback] ${label}: cancelled after ${secs()} (the browser left the page)`);
+      return bad("Cancelled.", 499);
+    }
+    if (err instanceof Anthropic.APIError) {
+      console.error(
+        `[feedback] ${label} FAILED after ${secs()}: Anthropic API ${err.status ?? "connection"} ${err.name}: ${err.message}` +
+          ` (request id: ${err.requestID ?? "n/a"})`,
+      );
+      const status = err.status && err.status < 500 ? err.status : 502;
+      return bad("Feedback is unavailable right now. Please try again.", status);
+    }
+    console.error(`[feedback] ${label} FAILED after ${secs()} (unexpected error):`, err);
+    return bad("Feedback is unavailable right now. Please try again.", 502);
   }
+}
+
+function logOk(label: string, time: string, usage: Anthropic.Usage) {
+  console.info(`[feedback] ${label} OK in ${time} (input ${usage.input_tokens} tokens, output ${usage.output_tokens} tokens)`);
+}
+
+function logUnusable(label: string, time: string, stopReason: string | null, details: unknown, extra?: string) {
+  const why =
+    stopReason === "max_tokens"
+      ? "hit max_tokens before finishing"
+      : stopReason === "refusal"
+        ? `model declined (${JSON.stringify(details)})`
+        : extra ?? `stop_reason=${stopReason}, output was not valid JSON`;
+  console.error(`[feedback] ${label} UNUSABLE after ${time}: ${why}`);
 }

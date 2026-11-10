@@ -1,14 +1,8 @@
-import { stripCompletionToken } from "./completion";
 import type { ChatMessage, FeedbackRequest, FullReport, QuestionFeedback } from "./types";
 
-/** Visible transcript turns only: drops practice-mode control turns and hides tokens. */
+/** Visible transcript turns only (drops practice-mode control turns). */
 export function visibleTurns(messages: ChatMessage[]): FeedbackRequest["transcript"] {
-  return messages
-    .filter((m) => !m.control)
-    .map(({ role, content }) => ({
-      role,
-      content: role === "assistant" ? stripCompletionToken(content).text || "Thank you." : content,
-    }));
+  return messages.filter((m) => !m.control).map(({ role, content }) => ({ role, content }));
 }
 
 async function post<T>(body: FeedbackRequest & { practice?: boolean }, signal?: AbortSignal): Promise<T> {

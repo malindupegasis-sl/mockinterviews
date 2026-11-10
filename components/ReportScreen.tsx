@@ -30,7 +30,13 @@ export default function ReportScreen({
   useEffect(() => {
     const controller = new AbortController();
     fetchFullReport(
-      { context: config.context, cv: config.cv, transcript: finished.transcript, practice: finished.practice },
+      {
+        context: config.context,
+        cv: config.cv,
+        difficulty: config.difficulty,
+        transcript: finished.transcript,
+        practice: finished.practice,
+      },
       controller.signal,
     )
       .then(setReport)
@@ -38,7 +44,7 @@ export default function ReportScreen({
         if (!controller.signal.aborted) setError(err instanceof Error ? err.message : "Couldn't produce the report.");
       });
     return () => controller.abort();
-  }, [config.context, config.cv, finished, attempt]);
+  }, [config.context, config.cv, config.difficulty, finished, attempt]);
 
   const copy = useCallback(async () => {
     if (!report) return;
@@ -105,6 +111,9 @@ export default function ReportScreen({
       <article className="mx-auto flex max-w-3xl flex-col gap-14 px-5 pb-16 pt-4">
         <header className="flex flex-col gap-2">
           <h1 className="text-sm uppercase tracking-[0.5em] text-signal">Feedback report</h1>
+          <p className="text-xs uppercase tracking-[0.25em] text-neutral-600">
+            {config.difficulty} · {finished.practice ? "practice" : "full interview"}
+          </p>
           {finished.practice && (
             <p className="text-xs text-neutral-500">Based on your final attempt at each question.</p>
           )}

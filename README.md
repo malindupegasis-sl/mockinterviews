@@ -30,7 +30,23 @@ Open http://localhost:3000 in Chrome or Edge and allow microphone access when as
 - **Full interview:** uninterrupted, with the full report at the end.
 - **Practice:** the interview pauses after each question (once its follow-ups are done) and shows a feedback card: score /5, what worked, the biggest weakness, what a stronger answer would include, and a short rewrite that uses only what you said. Choose **Retry this question** (earlier attempts stay in the transcript, labelled by attempt) or **Next question**. At the end you can still get the full report, based on your final attempt at each question.
 
+**Difficulty:**
+
+| Level | Follow-ups per question | Notes |
+|---|---|---|
+| Easy | none | One interviewer turn per question. |
+| Medium (default) | exactly one | |
+| Hard | 0–2, chosen by the model | Tougher (still professional) interviewer; stricter feedback scoring. The server forces the question to end after the 2nd follow-up. |
+
 Question 1 is always a "tell me about yourself / walk me through your background" variant.
+
+## How the interview structure works
+
+The **server** controls the interview, not the model. Each interviewer turn carries metadata issued by the server: what kind of turn it was, which question, follow-ups used, and the instruction that produced it. The browser sends that back with the conversation. On every request `lib/interviewFlow.ts` rebuilds the state from it, checks it against the difficulty rules, and decides what happens next. The model then gets one explicit instruction as a system message, such as "Ask main question 3 of 6", "Ask exactly one follow-up", or "Deliver the closing line". It never counts questions or decides when the interview ends. In practice mode the server pauses after every finished question with a fixed "Thank you." (no model call).
+
+On Hard, each turn after an answer returns a structured `{ action: "follow_up" | "question_done", text }`. The spoken `text` is streamed out of the JSON as it arrives, so voice latency doesn't change.
+
+**Debug strip (local dev only):** under `npm run dev` a small readout in the bottom-right corner shows the difficulty, the question number, follow-ups used and the last action. It never appears in production builds. The terminal also prints one `[interview]` line per turn.
 
 **Feedback report** (after **Get feedback**): an overall score /10 and a two-sentence verdict; per question, a one-line summary, score /5, the biggest weakness, what a stronger answer would include, and your actual answer (collapsed); a rewrite of your weakest answer using only facts you stated; and the top three patterns to fix. Use **Copy report**, **Practise again with the same context**, or **New interview**. Feedback isn't spoken aloud.
 
@@ -89,7 +105,7 @@ Voice settings and the model (`eleven_flash_v2_5`, chosen for low latency) are i
 
 | Path | What it does |
 |---|---|
-| `lib/prompts.ts` | **All system prompts** (interviewer, per-question feedback, full report) and the practice-mode control messages. |
+| `lib/prompts.ts` | **All prompts:** interviewer system prompt and difficulty tones, per-turn directives, per-question and full feedback. |
 | `app/api/interview/route.ts` | Validates the request, sends the transcript + system prompt to Claude, streams the reply back as plain text. |
 | `app/api/tts/route.ts` | `GET`: is ElevenLabs configured? `POST`: proxies ElevenLabs streaming TTS (audio/mpeg). |
 | `lib/tts.ts` | ElevenLabs model and voice settings. |
@@ -97,7 +113,9 @@ Voice settings and the model (`eleven_flash_v2_5`, chosen for low latency) are i
 | `lib/sentences.ts` | Splits streaming text into sentences. |
 | `lib/speech/Speaker.ts` | Ordered TTS playback queue + browser-voice fallback. |
 | `lib/speech/useSpeechRecognition.ts` | Push-to-talk speech recognition hook. |
-| `lib/completion.ts` | Detects and hides the `[INTERVIEW_COMPLETE]` and `[QUESTION_COMPLETE]` tokens. |
+| `lib/interviewFlow.ts` | **Interview structure:** state from turn metadata, difficulty rules, next step, API message building. |
+| `lib/jsonStream.ts` | Streams a string field out of JSON as it arrives (Hard-mode spoken text). |
+| `components/DebugStrip.tsx` | Dev-only state readout. |
 | `lib/speech/voices.ts` | Google UK voice options, loading, and fallback selection. |
 | `lib/viz/amplitude.ts` | Amplitude sources: simulated speech, AnalyserNode, mic. |
 | `components/Oscilloscope.tsx` | Canvas trace (60fps, glow, persistence, reduced motion). |
@@ -125,4 +143,22 @@ See `.env.example`.
 
 ## Model settings
 
-Both routes use `claude-sonnet-5-5` (`lib/anthropic.ts`). The interviewer runs at `effort: "low"` for fast conversational turns. Feedback runs at `effort: "high"`, because quality matters more than speed there, so a report can take up to a minute.
+Both routes use `claude-sonnet-5-5` (`lib/anthropic.ts`). The interviewer runs at `effort: "low"` for fast conversational turns (Hard-mode decision turns add a JSON schema). Feedback runs at `effort: "high"`, because quality matters more than speed there, so a report can take up to a minute.
+
+## Troubleshooting feedback
+
+Every feedback request prints `[feedback]` lines in the terminal running `npm run dev` (on Vercel, in the function logs):
+
+| Line | Meaning |
+|---|---|
+| `[feedback] full report: reviewing 14 turns (medium)…` | Request started. |
+| `[feedback] full report OK in 24.1s (input …, output … tokens)` | Success. |
+| `[feedback] … FAILED …: Anthropic API 401 AuthenticationError …` | Bad or missing `ANTHROPIC_API_KEY`. Check `.env.local` and restart the dev server. |
+| `… FAILED …: Anthropic API 429 RateLimitError …` | Rate limited or out of credit. Wait, or check your Anthropic console. |
+| `… FAILED …: Anthropic API 400 BadRequestError …` | The request was rejected. The message says why. Include the request id if you report it. |
+| `… FAILED …: Anthropic API connection APIConnectionError …` | No network route to the Anthropic API. |
+| `… UNUSABLE …: hit max_tokens before finishing` | The report was too long to finish. Try fewer questions. |
+| `… UNUSABLE …: model declined (…)` | The model refused (rare). The category is shown in brackets. |
+| `… cancelled after …s (the browser left the page)` | You navigated away mid-review. Harmless. |
+
+If nothing prints at all, the browser never reached `/api/feedback`. Check the browser console and Network tab.

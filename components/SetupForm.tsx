@@ -1,7 +1,9 @@
 "use client";
 
 import { useState } from "react";
+import { loadVoiceChoice, type VoiceName } from "@/lib/speech/voices";
 import { LIMITS } from "@/lib/types";
+import VoicePicker from "./VoicePicker";
 
 export interface InterviewConfig {
   context: string;
@@ -23,6 +25,8 @@ export default function SetupForm({
   const [numQuestions, setNumQuestions] = useState(
     initial?.numQuestions ?? LIMITS.defaultQuestions,
   );
+
+  const [voice, setVoice] = useState<VoiceName>(() => loadVoiceChoice());
 
   const trimmed = context.trim();
   const valid =
@@ -74,6 +78,8 @@ export default function SetupForm({
           onChange={(e) => setNumQuestions(Number(e.target.value))}
         />
       </label>
+
+      <VoicePicker value={voice} onChange={setVoice} />
 
       <button
         type="submit"

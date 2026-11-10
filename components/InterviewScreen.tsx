@@ -9,7 +9,8 @@ import { useSpeechRecognition } from "@/lib/speech/useSpeechRecognition";
 import type { ChatMessage } from "@/lib/types";
 import { LIMITS } from "@/lib/types";
 import type { InterviewConfig } from "./SetupForm";
-import VoicePicker, { loadSavedVoice } from "./VoicePicker";
+import VoicePicker from "./VoicePicker";
+import { loadVoiceChoice, type VoiceName } from "@/lib/speech/voices";
 
 /** Whose turn it is. "interviewer" covers both waiting for Claude and speaking. */
 type Turn = "interviewer" | "candidate" | "complete" | "error";
@@ -30,11 +31,12 @@ export default function InterviewScreen({
   const [notice, setNotice] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   const [voiceMode, setVoiceMode] = useState<SpeakerMode | null>(null);
-  const [browserVoice, setBrowserVoice] = useState<string | null>(() => loadSavedVoice());
+  const [voiceChoice, setVoiceChoice] = useState<VoiceName>(() => loadVoiceChoice());
 
   const stt = useSpeechRecognition();
   const speakerRef = useRef<Speaker | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const skippedRef = useRef(false); // user interrupted the current interviewer turn
   const bottomRef = useRef<HTMLDivElement>(null);
 
   /** Requests the interviewer's next turn and speaks it sentence by sentence as it streams. */
@@ -48,6 +50,7 @@ export default function InterviewScreen({
 
       speaker.stop();
       speaker.beginTurn();
+      skippedRef.current = false;
       const splitter = new SentenceSplitter();
       setTurn("interviewer");
       setError(null);
@@ -60,12 +63,16 @@ export default function InterviewScreen({
           (soFar) => {
             const visible = stripCompletionToken(soFar).text;
             setStreamingText(visible);
-            for (const sentence of splitter.push(visible)) speaker.enqueue(sentence);
+            for (const sentence of splitter.push(visible)) {
+              if (!skippedRef.current) speaker.enqueue(sentence);
+            }
           },
           controller.signal,
         );
         const { text, complete } = stripCompletionToken(raw);
-        for (const sentence of splitter.flush(text)) speaker.enqueue(sentence);
+        for (const sentence of splitter.flush(text)) {
+          if (!skippedRef.current) speaker.enqueue(sentence);
+        }
         setMessages([...history, { role: "assistant", content: text }]);
         setStreamingText("");
 
@@ -88,7 +95,7 @@ export default function InterviewScreen({
   // Strict Mode's mount → unmount → mount in development is harmless.
   useEffect(() => {
     const speaker = new Speaker();
-    speaker.browserVoiceURI = loadSavedVoice();
+    speaker.voiceChoice = loadVoiceChoice();
     speaker.onSpeakingChange = setSpeaking;
     speaker.onModeChange = setVoiceMode;
     speakerRef.current = speaker;
@@ -139,19 +146,31 @@ export default function InterviewScreen({
     else setNotice("I didn't catch anything. Tap the mic and try again, or type your answer.");
   }, [turn, processing, stt, submitAnswer]);
 
+  /** Interrupt: stop the interviewer's audio and hand over the turn (once the text has arrived). */
+  const skip = useCallback(() => {
+    if (turn !== "interviewer" || !speaking) return;
+    skippedRef.current = true;
+    speakerRef.current?.stop();
+  }, [turn, speaking]);
+
   // Spacebar shortcut for the mic (ignored while typing or when a control has focus).
+  // Space interrupts the interviewer while they're speaking; otherwise it toggles the mic.
   useEffect(() => {
-    if (!stt.supported) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.code !== "Space" || e.repeat) return;
       const el = e.target as HTMLElement | null;
       if (el?.closest("input, textarea, select, button, [contenteditable]")) return;
-      e.preventDefault();
-      void toggleMic();
+      if (turn === "interviewer" && speaking) {
+        e.preventDefault();
+        skip();
+      } else if (stt.supported) {
+        e.preventDefault();
+        void toggleMic();
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [stt.supported, toggleMic]);
+  }, [stt.supported, toggleMic, skip, turn, speaking]);
 
   /** Retry after an error: re-send the transcript as it stands. */
   const retry = () => requestTurn(messages);
@@ -180,10 +199,10 @@ export default function InterviewScreen({
         <div className="flex items-center gap-4 normal-case tracking-normal">
           {voiceMode === "browser" && (
             <VoicePicker
-              value={browserVoice}
-              onChange={(uri) => {
-                setBrowserVoice(uri);
-                if (speakerRef.current) speakerRef.current.browserVoiceURI = uri;
+              value={voiceChoice}
+              onChange={(name) => {
+                setVoiceChoice(name);
+                if (speakerRef.current) speakerRef.current.voiceChoice = name;
               }}
             />
           )}
@@ -198,11 +217,6 @@ export default function InterviewScreen({
           Voice answers need Chrome or Edge (this browser doesn&apos;t support speech recognition). You
           can still type your answers below.
         </div>
-      )}
-      {voiceMode === "browser" && (
-        <p className="text-xs text-neutral-500">
-          Using your browser&apos;s built-in voice (ElevenLabs isn&apos;t configured or failed).
-        </p>
       )}
 
       {/* Transcript */}
@@ -245,6 +259,15 @@ export default function InterviewScreen({
         </div>
       ) : (
         <>
+          {turn === "interviewer" && speaking && (
+            <button
+              type="button"
+              onClick={skip}
+              className="self-center rounded border border-neutral-700 px-3 py-1 text-xs uppercase tracking-widest text-neutral-400 hover:text-neutral-100"
+            >
+              Skip (Space)
+            </button>
+          )}
           {stt.supported && (
             <div className="flex flex-col items-center gap-2">
               <button
@@ -278,11 +301,15 @@ export default function InterviewScreen({
               placeholder={
                 stt.listening
                   ? "Listening… tap Stop (or press Space) to send"
+                  : turn === "interviewer"
+                  ? speaking
+                    ? "Interviewer speaking…"
+                    : "Interviewer thinking…"
                   : canAnswer
                   ? stt.supported
                     ? "…or type your answer (Enter to send)"
                     : "Type your answer (Enter to send, Shift+Enter for a new line)"
-                  : "Wait for your turn…"
+                  : "Processing…"
               }
               value={draft}
               maxLength={LIMITS.answerMaxChars}

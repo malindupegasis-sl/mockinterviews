@@ -1,9 +1,14 @@
 // Ordered text-to-speech playback.
 //
-// Each sentence is sent to /api/tts the moment it's enqueued (so audio for later
-// sentences downloads while earlier ones play) and clips are played strictly in
-// order through Web Audio. If ElevenLabs isn't configured or a request fails, the
-// sentence is spoken with the browser's speechSynthesis instead.
+// Default path: the browser's speechSynthesis (Chrome's Google UK voices), spoken
+// sentence by sentence. If both ELEVENLABS env vars are set on the server, each
+// sentence is instead sent to /api/tts as soon as it's enqueued (so later audio
+// downloads while earlier audio plays) and played strictly in order through Web
+// Audio. A failed ElevenLabs sentence is retried once; auth/quota errors switch
+// to browser speech immediately.
+
+import { splitLongSentence } from "../sentences";
+import { DEFAULT_VOICE, resolveVoice, waitForVoices, type VoiceName } from "./voices";
 
 export type SpeakerMode = "elevenlabs" | "browser";
 
@@ -12,20 +17,25 @@ interface QueueItem {
   audio: Promise<AudioBuffer | null>; // null → speak with the browser instead
 }
 
+/** Error from /api/tts that retrying won't fix. */
+class FatalTtsError extends Error {}
+
 export class Speaker {
   readonly ctx: AudioContext;
-  /** Playback runs through this node; Phase 3 reads amplitude from it for the visualiser. */
+  /** ElevenLabs playback runs through this node (usable for a real-audio visualiser). */
   readonly analyser: AnalyserNode;
 
   mode: SpeakerMode = "browser";
-  browserVoiceURI: string | null = null;
+  voiceChoice: VoiceName = DEFAULT_VOICE;
+  /** All speechSynthesis voices, loaded in init(). */
+  voices: SpeechSynthesisVoice[] = [];
   onSpeakingChange?: (speaking: boolean) => void;
   onModeChange?: (mode: SpeakerMode) => void;
 
   private queue: QueueItem[] = [];
   private running = false;
   private generation = 0; // bumped by stop() to cancel in-flight work
-  private spokenSoFar = ""; // previous sentences of the current turn, for continuity
+  private spokenSoFar = ""; // previous sentences of the current turn, for ElevenLabs continuity
   private idleWaiters: (() => void)[] = [];
   private currentSource: AudioBufferSourceNode | null = null;
   private currentUtterance: SpeechSynthesisUtterance | null = null;
@@ -37,15 +47,17 @@ export class Speaker {
     this.analyser.connect(this.ctx.destination);
   }
 
-  /** Asks the server whether ElevenLabs is configured and picks the mode. */
+  /** Loads browser voices and asks the server whether ElevenLabs is configured. */
   async init(): Promise<SpeakerMode> {
-    try {
-      const res = await fetch("/api/tts");
-      const data = await res.json();
-      this.setMode(data?.configured ? "elevenlabs" : "browser");
-    } catch {
-      this.setMode("browser");
-    }
+    const [configured, voices] = await Promise.all([
+      fetch("/api/tts")
+        .then((r) => r.json())
+        .then((d) => Boolean(d?.configured))
+        .catch(() => false),
+      waitForVoices(),
+    ]);
+    this.voices = voices;
+    this.setMode(configured ? "elevenlabs" : "browser");
     return this.mode;
   }
 
@@ -54,15 +66,20 @@ export class Speaker {
     this.spokenSoFar = "";
   }
 
-  enqueue(text: string) {
-    const previousText = this.spokenSoFar;
-    this.spokenSoFar += (this.spokenSoFar ? " " : "") + text;
-    const audio = this.mode === "elevenlabs" ? this.fetchAudio(text, previousText) : Promise.resolve(null);
-    this.queue.push({ text, audio });
+  enqueue(sentence: string) {
+    if (this.mode === "elevenlabs") {
+      const previousText = this.spokenSoFar;
+      this.spokenSoFar += (this.spokenSoFar ? " " : "") + sentence;
+      this.queue.push({ text: sentence, audio: this.fetchAudio(sentence, previousText) });
+    } else {
+      for (const piece of splitLongSentence(sentence)) {
+        this.queue.push({ text: piece, audio: Promise.resolve(null) });
+      }
+    }
     if (!this.running) void this.run();
   }
 
-  /** Resolves once everything queued so far has finished playing. */
+  /** Resolves once everything queued so far has finished playing (or stop() is called). */
   waitUntilIdle(): Promise<void> {
     if (!this.running && this.queue.length === 0) return Promise.resolve();
     return new Promise((resolve) => this.idleWaiters.push(resolve));
@@ -92,21 +109,34 @@ export class Speaker {
     this.onModeChange?.(mode);
   }
 
+  /** Fetches one sentence from ElevenLabs; retries once unless the error is auth/quota. */
   private async fetchAudio(text: string, previousText: string): Promise<AudioBuffer | null> {
-    try {
-      const res = await fetch("/api/tts", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text, previousText }),
-      });
-      if (!res.ok) throw new Error(`TTS failed (${res.status})`);
-      return await this.ctx.decodeAudioData(await res.arrayBuffer());
-    } catch (err) {
-      // Don't keep hammering a failing service: use browser speech for the rest of the session.
-      console.warn("[speaker] ElevenLabs failed, falling back to browser speech:", err);
-      this.setMode("browser");
-      return null;
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      if (this.mode !== "elevenlabs") return null; // already switched by another sentence
+      try {
+        const res = await fetch("/api/tts", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text, previousText }),
+        });
+        if (!res.ok) {
+          const data = await res.json().catch(() => null);
+          const msg = `TTS failed (${res.status}${data?.code ? `, ${data.code}` : ""})`;
+          if (data?.code === "auth" || data?.code === "quota") throw new FatalTtsError(msg);
+          throw new Error(msg);
+        }
+        return await this.ctx.decodeAudioData(await res.arrayBuffer());
+      } catch (err) {
+        if (err instanceof FatalTtsError || attempt === 2) {
+          console.warn("[speaker] ElevenLabs unavailable, switching to browser speech:", err);
+          this.setMode("browser");
+          return null;
+        }
+        console.warn("[speaker] ElevenLabs sentence failed, retrying once:", err);
+        await new Promise((r) => setTimeout(r, 300));
+      }
     }
+    return null;
   }
 
   private async run() {
@@ -120,7 +150,13 @@ export class Speaker {
       const buffer = await item.audio;
       if (gen !== this.generation) return;
       if (buffer) await this.playBuffer(buffer);
-      else await this.speakWithBrowser(item.text);
+      else {
+        // An ElevenLabs sentence that fell back may still be long: split it too.
+        for (const piece of splitLongSentence(item.text)) {
+          if (gen !== this.generation) return;
+          await this.speakWithBrowser(piece);
+        }
+      }
     }
     if (gen === this.generation) this.finishRun();
   }
@@ -151,7 +187,9 @@ export class Speaker {
     return new Promise((resolve) => {
       if (typeof speechSynthesis === "undefined") return resolve();
       const u = new SpeechSynthesisUtterance(text);
-      const voice = pickBrowserVoice(this.browserVoiceURI);
+      // Voices can finish loading after init() on some browsers; re-read if we have none yet.
+      if (this.voices.length === 0) this.voices = speechSynthesis.getVoices();
+      const voice = resolveVoice(this.voices, this.voiceChoice);
       if (voice) {
         u.voice = voice;
         u.lang = voice.lang;
@@ -160,7 +198,7 @@ export class Speaker {
       }
       u.rate = 0.95;
       // Chrome occasionally never fires onend; a generous timeout keeps the queue moving.
-      const timeout = setTimeout(resolve, 2000 + text.length * 120);
+      const timeout = setTimeout(resolve, 3000 + text.length * 120);
       const done = () => {
         clearTimeout(timeout);
         resolve();
@@ -171,18 +209,4 @@ export class Speaker {
       speechSynthesis.speak(u);
     });
   }
-}
-
-/** English (GB/US) voices available in this browser, en-GB first. */
-export function englishVoices(): SpeechSynthesisVoice[] {
-  if (typeof speechSynthesis === "undefined") return [];
-  return speechSynthesis
-    .getVoices()
-    .filter((v) => /^en[-_](GB|US)/i.test(v.lang))
-    .sort((a, b) => Number(/GB/i.test(b.lang)) - Number(/GB/i.test(a.lang)) || a.name.localeCompare(b.name));
-}
-
-function pickBrowserVoice(uri: string | null): SpeechSynthesisVoice | null {
-  const voices = englishVoices();
-  return voices.find((v) => v.voiceURI === uri) ?? voices[0] ?? null;
 }

@@ -36,3 +36,22 @@ export class SentenceSplitter {
     return rest ? [rest] : [];
   }
 }
+
+/**
+ * Chrome's Google voices can cut off on long utterances, so split any sentence
+ * longer than `max` characters: at the last comma before the limit, else the last space.
+ */
+export function splitLongSentence(text: string, max = 200): string[] {
+  const parts: string[] = [];
+  let rest = text.trim();
+  while (rest.length > max) {
+    const window = rest.slice(0, max);
+    let cut = window.lastIndexOf(",");
+    if (cut < max * 0.25) cut = window.lastIndexOf(" ");
+    if (cut <= 0) cut = max - 1;
+    parts.push(rest.slice(0, cut + 1).trim());
+    rest = rest.slice(cut + 1).trim();
+  }
+  if (rest) parts.push(rest);
+  return parts;
+}

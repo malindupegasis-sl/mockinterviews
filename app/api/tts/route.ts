@@ -61,8 +61,14 @@ export async function POST(req: Request) {
   }
 
   if (!upstream.ok || !upstream.body) {
-    console.error("[tts] ElevenLabs error:", upstream.status, await upstream.text().catch(() => ""));
-    return Response.json({ error: "Text-to-speech failed." }, { status: 502 });
+    const detail = await upstream.text().catch(() => "");
+    console.error("[tts] ElevenLabs error:", upstream.status, detail);
+    // Tell the client whether retrying could help: auth and quota errors won't fix themselves.
+    const quota = upstream.status === 402 || /quota|credits|payment/i.test(detail);
+    if (quota) return Response.json({ error: "ElevenLabs quota exceeded.", code: "quota" }, { status: 402 });
+    if (upstream.status === 401 || upstream.status === 403)
+      return Response.json({ error: "ElevenLabs rejected the API key.", code: "auth" }, { status: 401 });
+    return Response.json({ error: "Text-to-speech failed.", code: "upstream" }, { status: 502 });
   }
 
   return new Response(upstream.body, {

@@ -61,7 +61,7 @@ export async function POST(req: Request) {
   if ("error" in parsed) return bad(parsed.error);
   const { context, numQuestions, messages } = parsed;
 
-  const stream = anthropic.beta.messages.stream({
+  const stream = anthropic.messages.stream({
     model: MODEL,
     max_tokens: 4000,
     system: interviewerSystemPrompt({ context, numQuestions }),
@@ -73,9 +73,6 @@ export async function POST(req: Request) {
     output_config: { effort: "low" },
     // Cache the stable prefix (system prompt + earlier turns) across turns.
     cache_control: { type: "ephemeral" },
-    // If the model declines in a category that supports it, the API retries on a fallback model.
-    betas: ["server-side-fallback-2026-07-01"],
-    fallbacks: "default",
   });
 
   // Wait for response headers so auth/rate-limit errors become a proper HTTP error

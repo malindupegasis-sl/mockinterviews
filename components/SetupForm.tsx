@@ -1,7 +1,8 @@
 "use client";
 
 import { useState } from "react";
-import { loadVoiceChoice, type VoiceName } from "@/lib/speech/voices";
+import { unlockAudio } from "@/lib/speech/unlock";
+import { loadVoiceChoice } from "@/lib/speech/voices";
 import { LIMITS, type Difficulty, type InterviewConfig, type InterviewMode } from "@/lib/types";
 import { Footer } from "./AccessGate";
 import Oscilloscope from "./Oscilloscope";
@@ -27,8 +28,9 @@ const DIFFICULTIES: { value: Difficulty; title: string; blurb: string }[] = [
 ];
 
 const label = "text-[10px] uppercase tracking-[0.3em] text-neutral-500";
+// text-base (16px) on phones: iOS Safari zooms the page into smaller inputs.
 const field =
-  "resize-y border border-neutral-800 bg-transparent p-4 text-sm leading-relaxed text-neutral-200 outline-none transition-colors placeholder:text-neutral-700 focus:border-signal/50";
+  "resize-y border border-neutral-800 bg-transparent p-4 text-base sm:text-sm leading-relaxed text-neutral-200 outline-none transition-colors placeholder:text-neutral-700 focus:border-signal/50";
 
 export default function SetupForm({
   initial,
@@ -42,7 +44,7 @@ export default function SetupForm({
   const [numQuestions, setNumQuestions] = useState(initial?.numQuestions ?? LIMITS.defaultQuestions);
   const [mode, setMode] = useState<InterviewMode>(initial?.mode ?? "full");
   const [difficulty, setDifficulty] = useState<Difficulty>(initial?.difficulty ?? "medium");
-  const [voice, setVoice] = useState<VoiceName>(() => loadVoiceChoice());
+  const [voice, setVoice] = useState<string | null>(() => loadVoiceChoice());
 
   const trimmed = context.trim();
   const valid =
@@ -63,7 +65,10 @@ export default function SetupForm({
         className="mx-auto flex w-full max-w-2xl flex-1 flex-col gap-8 px-5 pb-12 pt-4"
         onSubmit={(e) => {
           e.preventDefault();
-          if (valid) onStart({ context: trimmed, cv: cv.trim(), numQuestions, mode, difficulty });
+          if (!valid) return;
+          // Must run inside the tap: iOS only allows audio that a user gesture started.
+          unlockAudio();
+          onStart({ context: trimmed, cv: cv.trim(), numQuestions, mode, difficulty });
         }}
       >
         <header className="space-y-3">
@@ -109,7 +114,7 @@ export default function SetupForm({
             <span className={label}>Questions</span>
             <input
               type="number"
-              className="w-16 border border-neutral-800 bg-transparent px-2 py-1.5 text-center text-sm text-neutral-200 outline-none transition-colors focus:border-signal/50"
+              className="w-16 border border-neutral-800 bg-transparent px-2 py-1.5 text-center text-base sm:text-sm text-neutral-200 outline-none transition-colors focus:border-signal/50"
               min={LIMITS.minQuestions}
               max={LIMITS.maxQuestions}
               value={numQuestions}

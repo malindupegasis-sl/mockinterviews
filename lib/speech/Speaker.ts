@@ -15,7 +15,8 @@ import {
   SimulatedSpeechAmplitude,
   type AmplitudeSource,
 } from "../viz/amplitude";
-import { DEFAULT_VOICE, resolveVoice, waitForVoices, type VoiceName } from "./voices";
+import { getAudioContext } from "./unlock";
+import { resolveVoice, waitForVoices } from "./voices";
 
 export type SpeakerMode = "elevenlabs" | "browser";
 
@@ -39,7 +40,8 @@ export class Speaker {
   private simulated = new SimulatedSpeechAmplitude();
 
   mode: SpeakerMode = "browser";
-  voiceChoice: VoiceName = DEFAULT_VOICE;
+  /** Saved voice (voiceURI or name); null = best available on this device. */
+  voiceChoice: string | null = null;
   /** All speechSynthesis voices, loaded in init(). */
   voices: SpeechSynthesisVoice[] = [];
   onSpeakingChange?: (speaking: boolean) => void;
@@ -54,7 +56,8 @@ export class Speaker {
   private currentUtterance: SpeechSynthesisUtterance | null = null;
 
   constructor() {
-    this.ctx = new AudioContext();
+    // Shared context, unlocked by the "Start interview" tap (required on iOS).
+    this.ctx = getAudioContext();
     this.analyser = this.ctx.createAnalyser();
     this.analyser.fftSize = 2048;
     this.analyser.connect(this.ctx.destination);
@@ -115,7 +118,7 @@ export class Speaker {
 
   dispose() {
     this.stop();
-    void this.ctx.close();
+    this.analyser.disconnect(); // the shared AudioContext stays open for the next interview
   }
 
   private setMode(mode: SpeakerMode) {
@@ -158,7 +161,8 @@ export class Speaker {
     this.running = true;
     this.onSpeakingChange?.(true);
     const gen = this.generation;
-    if (this.ctx.state === "suspended") await this.ctx.resume().catch(() => {});
+    // Never wait on resume(): on iOS it can hang outside a tap, and browser speech doesn't need it.
+    if (this.ctx.state === "suspended") void this.ctx.resume().catch(() => {});
 
     while (this.queue.length > 0 && gen === this.generation) {
       const item = this.queue.shift()!;

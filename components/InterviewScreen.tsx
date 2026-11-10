@@ -7,10 +7,11 @@ import { streamInterviewerTurn } from "@/lib/interviewClient";
 import { SentenceSplitter } from "@/lib/sentences";
 import { Speaker, type SpeakerMode } from "@/lib/speech/Speaker";
 import { useSpeechRecognition } from "@/lib/speech/useSpeechRecognition";
-import { loadVoiceChoice, type VoiceName } from "@/lib/speech/voices";
+import { loadVoiceChoice } from "@/lib/speech/voices";
+import { usePlatform } from "@/lib/platform";
 import type { ChatMessage, Control, InterviewConfig, QuestionFeedback } from "@/lib/types";
 import { LIMITS } from "@/lib/types";
-import { MicAmplitude } from "@/lib/viz/amplitude";
+import { MicAmplitude, SimulatedSpeechAmplitude } from "@/lib/viz/amplitude";
 import DebugStrip from "./DebugStrip";
 import MicButton from "./MicButton";
 import Oscilloscope, { type TraceMode } from "./Oscilloscope";
@@ -82,18 +83,35 @@ export default function InterviewScreen({
   const [notice, setNotice] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   const [voiceMode, setVoiceMode] = useState<SpeakerMode | null>(null);
-  const [voiceChoice, setVoiceChoice] = useState<VoiceName>(() => loadVoiceChoice());
+  const [voiceChoice, setVoiceChoice] = useState<string | null>(() => loadVoiceChoice());
   const [showTranscript, setShowTranscript] = useState(false);
   const [typingOpen, setTypingOpen] = useState(false);
   const [typed] = useState(() => new Map<number, number>()); // typewriter progress per line
   const [feedbacks, setFeedbacks] = useState<Record<number, FeedbackState>>({}); // keyed by attempt start
 
-  const stt = useSpeechRecognition();
+  const platform = usePlatform();
+  // If listening stops early (common on iOS), keep what was heard instead of losing it.
+  const stt = useSpeechRecognition({
+    onEndedEarly: (text) => {
+      if (text.trim()) {
+        setDraft(text.trim());
+        setTypingOpen(true);
+        setNotice("Listening stopped early. Your words are in the box below: edit them if needed and press Send, or tap the mic to try again.");
+      } else {
+        setNotice("Listening stopped. Tap the mic to try again, or type your answer.");
+      }
+    },
+  });
+  // Safari/iOS: drive your trace from recognised words rather than opening the mic a
+  // second time (on iOS a second capture can disrupt recognition and audio output).
+  const [userSim] = useState(() => new SimulatedSpeechAmplitude());
+  const prevWordsRef = useRef(0);
   const speakerRef = useRef<Speaker | null>(null);
   const micRef = useRef<MicAmplitude | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const feedbackAbortRef = useRef<AbortController | null>(null);
   const skippedRef = useRef(false); // user interrupted the current interviewer turn
+  const answerRef = useRef<HTMLTextAreaElement>(null);
 
   const attempts = deriveAttempts(messages);
   const currentAttempt = attempts[attempts.length - 1];
@@ -249,13 +267,27 @@ export default function InterviewScreen({
     };
   }, [requestTurn]);
 
-  // Open the mic level meter only while listening (so the browser's mic indicator isn't always on).
+  // Open the mic level meter only while listening (so the browser's mic indicator isn't
+  // always on). Not on Safari/iOS, which use the recognised words instead (below).
   useEffect(() => {
     const mic = micRef.current;
-    if (!mic || !stt.listening) return;
+    if (!mic || !stt.listening || platform.webkit) return;
     void mic.start();
     return () => mic.stop();
-  }, [stt.listening]);
+  }, [stt.listening, platform.webkit]);
+
+  // Safari/iOS: each batch of newly recognised words makes the trace pulse.
+  useEffect(() => {
+    if (!platform.webkit) return;
+    if (!stt.listening) {
+      userSim.utteranceEnd();
+      prevWordsRef.current = 0;
+      return;
+    }
+    const words = stt.transcript.split(/\s+/).filter(Boolean);
+    if (words.length > prevWordsRef.current) userSim.utteranceStart(words.slice(prevWordsRef.current).join(" "), 1.4);
+    prevWordsRef.current = words.length;
+  }, [stt.transcript, stt.listening, platform.webkit, userSim]);
 
   const submitAnswer = useCallback(
     (answer: string) => {
@@ -335,6 +367,11 @@ export default function InterviewScreen({
     return () => window.removeEventListener("keydown", onKey);
   }, [stt.supported, toggleMic, skip, turn, speaking]);
 
+  // When typing is the main input, put the cursor in the answer box on each new turn.
+  useEffect(() => {
+    if (turn === "candidate" && !stt.supported) answerRef.current?.focus();
+  }, [turn, stt.supported]);
+
   /** Retry after an error: re-send the conversation as it stands (the server re-plans the turn). */
   const retry = () => requestTurn(messages);
 
@@ -381,10 +418,10 @@ export default function InterviewScreen({
 
   // Amplitude for the trace: the mic while the candidate speaks, the speaker while the interviewer does.
   const level = useCallback(() => {
-    if (traceMode === "user") return micRef.current?.level() ?? 0;
+    if (traceMode === "user") return platform.webkit ? userSim.level() : (micRef.current?.level() ?? 0);
     if (traceMode === "interviewer") return speakerRef.current?.amplitude.level() ?? 0;
     return 0;
-  }, [traceMode]);
+  }, [traceMode, platform.webkit, userSim]);
 
   const caption = reviewing
     ? "Reviewing your answer…"
@@ -392,13 +429,20 @@ export default function InterviewScreen({
       ? stt.transcript || "…"
       : (stt.error ?? notice ?? "");
 
+  // Phones have no Space key, so the hint only mentions tapping there.
   const hint =
     turn === "interviewer" && speaking
-      ? "Space to skip"
+      ? platform.ios
+        ? "Tap Skip to interrupt"
+        : "Space to skip"
       : canAnswer && stt.supported
         ? stt.listening
-          ? "Tap or press Space to send"
-          : "Tap or press Space to answer"
+          ? platform.ios
+            ? "Tap to send"
+            : "Tap or press Space to send"
+          : platform.ios
+            ? "Tap to answer"
+            : "Tap or press Space to answer"
         : "";
 
   // Transcript lines (control turns hidden), with attempt labels in practice mode.
@@ -448,7 +492,9 @@ export default function InterviewScreen({
 
       {!stt.supported && (
         <div className="mx-5 border border-signal/30 px-4 py-2 text-center text-xs text-neutral-300">
-          Voice answers need Chrome or Edge. You can still type your answers below.
+          {platform.ios
+            ? "Voice answers aren't available in this browser, so type your answers below. You'll still hear the questions."
+            : "Voice answers need Chrome, Edge or Safari. Type your answers below; you'll still hear the questions."}
         </div>
       )}
 
@@ -518,31 +564,43 @@ export default function InterviewScreen({
 
         {(turn === "interviewer" || turn === "candidate") && (
           <>
-            <div className="grid grid-cols-[6rem_auto_6rem] items-center gap-6">
-              <div className="flex justify-end">
-                {turn === "interviewer" && speaking && (
-                  <button
-                    type="button"
-                    onClick={skip}
-                    className="text-[10px] uppercase tracking-[0.3em] text-neutral-500 transition-colors hover:text-signal"
-                  >
-                    Skip
-                  </button>
-                )}
-              </div>
-              {stt.supported ? (
-                <MicButton
-                  active={stt.listening}
-                  busy={processing}
-                  disabled={!canAnswer}
-                  onClick={() => void toggleMic()}
-                />
-              ) : (
-                <div className="h-20 w-20" />
-              )}
-              <div />
-            </div>
-            <div className="h-4 text-[10px] uppercase tracking-[0.25em] text-neutral-600">{hint}</div>
+            {stt.supported ? (
+              <>
+                <div className="grid grid-cols-[6rem_auto_6rem] items-center gap-6">
+                  <div className="flex justify-end">
+                    {turn === "interviewer" && speaking && (
+                      <button
+                        type="button"
+                        onClick={skip}
+                        className="text-[10px] uppercase tracking-[0.3em] text-neutral-500 transition-colors hover:text-signal"
+                      >
+                        Skip
+                      </button>
+                    )}
+                  </div>
+                  <MicButton
+                    active={stt.listening}
+                    busy={processing}
+                    disabled={!canAnswer}
+                    onClick={() => void toggleMic()}
+                  />
+                  <div />
+                </div>
+                <div className="h-4 text-[10px] uppercase tracking-[0.25em] text-neutral-600">{hint}</div>
+              </>
+            ) : (
+              // No speech recognition: typing is the main input, so no mic button.
+              turn === "interviewer" &&
+              speaking && (
+                <button
+                  type="button"
+                  onClick={skip}
+                  className="text-[10px] uppercase tracking-[0.3em] text-neutral-500 transition-colors hover:text-signal"
+                >
+                  Skip
+                </button>
+              )
+            )}
 
             {textOpen && (
               <form
@@ -553,8 +611,9 @@ export default function InterviewScreen({
                 }}
               >
                 <textarea
-                  rows={2}
-                  className="min-h-12 flex-1 resize-none border border-neutral-800 bg-transparent px-3 py-2 text-sm leading-relaxed text-neutral-200 outline-none transition-colors placeholder:text-neutral-600 focus:border-signal/50 disabled:opacity-40"
+                  ref={answerRef}
+                  rows={stt.supported ? 2 : 4}
+                  className="min-h-12 flex-1 resize-none border border-neutral-800 bg-transparent px-3 py-2 text-base leading-relaxed sm:text-sm text-neutral-200 outline-none transition-colors placeholder:text-neutral-600 focus:border-signal/50 disabled:opacity-40"
                   placeholder={
                     stt.listening
                       ? "Listening… tap the mic (or press Space) to send"
@@ -563,7 +622,9 @@ export default function InterviewScreen({
                           ? "Interviewer speaking…"
                           : "Interviewer thinking…"
                         : canAnswer
-                          ? "Type your answer (Enter to send, Shift+Enter for a new line)"
+                          ? stt.supported
+                            ? "Type your answer (Enter to send, Shift+Enter for a new line)"
+                            : "Type your answer, then press Send"
                           : "Processing…"
                   }
                   value={draft}

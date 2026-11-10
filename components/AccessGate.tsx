@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { setAccessCode } from "@/lib/api";
+import { usePlatform } from "@/lib/platform";
 import Oscilloscope from "./Oscilloscope";
 
 /** Asks for the access code (checked server-side) before anything else. */
@@ -51,7 +52,7 @@ export default function AccessGate() {
             autoComplete="off"
             value={code}
             onChange={(e) => setCode(e.target.value)}
-            className="border border-neutral-800 bg-transparent px-4 py-3 text-sm tracking-widest text-neutral-200 outline-none transition-colors focus:border-signal/50"
+            className="border border-neutral-800 bg-transparent px-4 py-3 text-base tracking-widest sm:text-sm text-neutral-200 outline-none transition-colors focus:border-signal/50"
           />
         </label>
         {error && <p className="text-sm text-signal">{error}</p>}
@@ -68,7 +69,10 @@ export default function AccessGate() {
   );
 }
 
+/** "Best in Chrome." — hidden on iPhone/iPad, where every browser uses Safari's engine. */
 export function Footer() {
+  const { ios } = usePlatform();
+  if (ios) return <footer className="py-6" />;
   return (
     <footer className="px-5 py-6 text-center text-[10px] uppercase tracking-[0.3em] text-neutral-600">
       Best in Chrome.

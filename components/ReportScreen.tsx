@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { fetchFullReport } from "@/lib/feedbackClient";
+import { unlockAudio } from "@/lib/speech/unlock";
 import type { FullReport, InterviewConfig } from "@/lib/types";
 import type { FinishedInterview } from "./InterviewScreen";
 import Oscilloscope from "./Oscilloscope";
@@ -183,7 +184,13 @@ export default function ReportScreen({
 
         <footer className="flex flex-wrap gap-3 border-t border-neutral-900 pt-8">
           <Button onClick={copy}>{copied ? "Copied" : "Copy report"}</Button>
-          <Button primary onClick={onPractiseAgain}>
+          <Button
+            primary
+            onClick={() => {
+              unlockAudio(); // inside the tap, for iOS
+              onPractiseAgain();
+            }}
+          >
             Practise again with the same context
           </Button>
           <Button onClick={onNew}>New interview</Button>

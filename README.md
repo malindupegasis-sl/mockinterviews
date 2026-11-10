@@ -42,6 +42,22 @@ Locally, only `ANTHROPIC_API_KEY` is required. If `ACCESS_CODE` is unset, any co
 
 Question 1 is always a "tell me about yourself / walk me through your background" variant.
 
+## Browser support
+
+| Browser | Voice answers | Interviewer voice |
+|---|---|---|
+| Chrome / Edge (desktop) | Yes | Google UK English Male / Female (Chrome), Microsoft voices (Edge) |
+| Safari 14.1+ (Mac) | Yes (`webkitSpeechRecognition`) | Best British voice on the Mac, e.g. Daniel or Serena |
+| iPhone / iPad (any browser: all use Safari's engine) | Usually yes (Safari 14.1+, needs Dictation enabled) | Best British voice on the device |
+| Firefox | No, typed answers are the main input | Best English voice available |
+
+Safari and iOS details:
+- **Audio unlock:** iOS blocks speech and Web Audio until a tap. "Start interview" (and "Practise again") unlock audio inside the tap, so the first question plays.
+- **Microphone permission:** if it's blocked, the app explains where to allow it (Safari > Settings for This Website on Mac; Settings > Safari > Microphone on iPhone). "Speech recognition is turned off" means Dictation is disabled.
+- **Listening that stops early:** Safari can end recognition by itself. If it can't be resumed, listening stops, your words so far go into the type box, and the mic button resets.
+- **Your trace:** on Safari/iOS the dim waveform while you speak follows the recognised words instead of opening the microphone a second time.
+- **Voices:** the picker lists the device's good English voices, British first, and skips novelty voices. On iPhone you can download better voices under Settings > Accessibility > Spoken Content > Voices > English, e.g. "Daniel (Enhanced)".
+
 ## How the interview structure works
 
 The **server** controls the interview, not the model. Each interviewer turn carries metadata issued by the server: what kind of turn it was, which question, follow-ups used, and the instruction that produced it. The browser sends that back with the conversation. On every request `lib/interviewFlow.ts` rebuilds the state from it, checks it against the difficulty rules, and decides what happens next. The model then gets one explicit instruction as a system message, such as "Ask main question 3 of 6", "Ask exactly one follow-up", or "Deliver the closing line". It never counts questions or decides when the interview ends. In practice mode the server pauses after every finished question with a fixed "Thank you." (no model call).

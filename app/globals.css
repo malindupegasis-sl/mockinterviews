@@ -1,13 +1,49 @@
 @import "tailwindcss";
 
-/* Phase 1: plain dark theme. The full visual design lands in Phase 3. */
-:root {
-  --background: #050505;
-  --foreground: #ededed;
+/* Design tokens: deep black, one signal red, monospace everything. */
+@theme inline {
+  --color-void: #050505;
+  --color-signal: #ff1a1a; /* interviewer trace core, accents */
+  --color-signal-dim: #8a1010; /* candidate trace, desaturated */
+  --font-mono: var(--font-jetbrains-mono), ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 
+:root {
+  color-scheme: dark;
+}
+
+html,
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  background: #050505;
+  color: #e6e6e6;
+  font-family: var(--font-mono);
+}
+
+::selection {
+  background: rgba(255, 26, 26, 0.35);
+  color: #fff;
+}
+
+/* Thin, quiet scrollbars to match the minimal chrome. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #2a2a2a transparent;
+}
+
+/* Blinking caret for the typewriter transcript. */
+@keyframes caret {
+  50% {
+    opacity: 0;
+  }
+}
+.caret::after {
+  content: "▍";
+  margin-left: 1px;
+  color: #ff1a1a;
+  animation: caret 1s steps(1) infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .caret::after {
+    animation: none;
+  }
 }

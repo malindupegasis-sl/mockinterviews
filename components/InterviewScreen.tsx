@@ -6,11 +6,15 @@ import { streamInterviewerTurn } from "@/lib/interviewClient";
 import { SentenceSplitter } from "@/lib/sentences";
 import { Speaker, type SpeakerMode } from "@/lib/speech/Speaker";
 import { useSpeechRecognition } from "@/lib/speech/useSpeechRecognition";
+import { loadVoiceChoice, type VoiceName } from "@/lib/speech/voices";
 import type { ChatMessage } from "@/lib/types";
 import { LIMITS } from "@/lib/types";
+import { MicAmplitude } from "@/lib/viz/amplitude";
+import MicButton from "./MicButton";
+import Oscilloscope, { type TraceMode } from "./Oscilloscope";
 import type { InterviewConfig } from "./SetupForm";
+import Transcript from "./Transcript";
 import VoicePicker from "./VoicePicker";
-import { loadVoiceChoice, type VoiceName } from "@/lib/speech/voices";
 
 /** Whose turn it is. "interviewer" covers both waiting for Claude and speaking. */
 type Turn = "interviewer" | "candidate" | "complete" | "error";
@@ -32,12 +36,15 @@ export default function InterviewScreen({
   const [draft, setDraft] = useState("");
   const [voiceMode, setVoiceMode] = useState<SpeakerMode | null>(null);
   const [voiceChoice, setVoiceChoice] = useState<VoiceName>(() => loadVoiceChoice());
+  const [showTranscript, setShowTranscript] = useState(false);
+  const [typingOpen, setTypingOpen] = useState(false);
+  const [typed] = useState(() => new Map<number, number>()); // typewriter progress per line
 
   const stt = useSpeechRecognition();
   const speakerRef = useRef<Speaker | null>(null);
+  const micRef = useRef<MicAmplitude | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const skippedRef = useRef(false); // user interrupted the current interviewer turn
-  const bottomRef = useRef<HTMLDivElement>(null);
 
   /** Requests the interviewer's next turn and speaks it sentence by sentence as it streams. */
   const requestTurn = useCallback(
@@ -99,6 +106,8 @@ export default function InterviewScreen({
     speaker.onSpeakingChange = setSpeaking;
     speaker.onModeChange = setVoiceMode;
     speakerRef.current = speaker;
+    const mic = new MicAmplitude();
+    micRef.current = mic;
 
     let cancelled = false;
     speaker.init().then((mode) => {
@@ -111,13 +120,19 @@ export default function InterviewScreen({
       cancelled = true;
       abortRef.current?.abort();
       speaker.dispose();
+      mic.stop();
       speakerRef.current = null;
+      micRef.current = null;
     };
   }, [requestTurn]);
 
+  // Open the mic level meter only while listening (so the browser's mic indicator isn't always on).
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [messages, streamingText, stt.transcript]);
+    const mic = micRef.current;
+    if (!mic || !stt.listening) return;
+    void mic.start();
+    return () => mic.stop();
+  }, [stt.listening]);
 
   const submitAnswer = useCallback(
     (answer: string) => {
@@ -143,7 +158,7 @@ export default function InterviewScreen({
     const text = await stt.stop();
     setProcessing(false);
     if (text.trim()) submitAnswer(text);
-    else setNotice("I didn't catch anything. Tap the mic and try again, or type your answer.");
+    else setNotice("Didn't catch that. Tap the mic and try again, or type your answer.");
   }, [turn, processing, stt, submitAnswer]);
 
   /** Interrupt: stop the interviewer's audio and hand over the turn (once the text has arrived). */
@@ -153,7 +168,6 @@ export default function InterviewScreen({
     speakerRef.current?.stop();
   }, [turn, speaking]);
 
-  // Spacebar shortcut for the mic (ignored while typing or when a control has focus).
   // Space interrupts the interviewer while they're speaking; otherwise it toggles the mic.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -175,6 +189,10 @@ export default function InterviewScreen({
   /** Retry after an error: re-send the transcript as it stands. */
   const retry = () => requestTurn(messages);
 
+  // ---- Derived view state ----
+  const canAnswer = turn === "candidate" && !processing;
+  const textOpen = typingOpen || !stt.supported;
+
   const status =
     turn === "interviewer"
       ? speaking
@@ -190,15 +208,52 @@ export default function InterviewScreen({
           ? "Complete"
           : "Error";
 
-  const canAnswer = turn === "candidate" && !processing;
+  const traceMode: TraceMode =
+    turn === "interviewer"
+      ? speaking
+        ? "interviewer"
+        : "thinking"
+      : turn === "candidate"
+        ? stt.listening
+          ? "user"
+          : processing
+            ? "thinking"
+            : "idle"
+        : "idle";
+
+  // Amplitude for the trace: the mic while the candidate speaks, the speaker while the interviewer does.
+  const level = useCallback(() => {
+    if (traceMode === "user") return micRef.current?.level() ?? 0;
+    if (traceMode === "interviewer") return speakerRef.current?.amplitude.level() ?? 0;
+    return 0;
+  }, [traceMode]);
+
+  const caption =
+    stt.listening || processing ? stt.transcript || "…" : (stt.error ?? notice ?? "");
+
+  const hint =
+    turn === "interviewer" && speaking
+      ? "Space to skip"
+      : canAnswer && stt.supported
+        ? stt.listening
+          ? "Tap or press Space to send"
+          : "Tap or press Space to answer"
+        : "";
+
+  const transcriptLines: ChatMessage[] =
+    turn === "interviewer" && streamingText
+      ? [...messages, { role: "assistant", content: streamingText }]
+      : messages;
 
   return (
-    <div className="flex w-full max-w-2xl flex-1 flex-col gap-4">
-      <div className="flex flex-wrap items-center justify-between gap-2 text-xs uppercase tracking-widest text-neutral-500">
-        <span className="text-red-500/60">{status}</span>
-        <div className="flex items-center gap-4 normal-case tracking-normal">
+    <div className="fixed inset-0 flex flex-col bg-void">
+      {/* Top bar: minimal chrome */}
+      <header className="flex items-center justify-between gap-4 px-5 py-4 text-[10px] uppercase tracking-[0.3em] text-neutral-600">
+        <span className="hidden sm:inline">Mock interview</span>
+        <div className="ml-auto flex items-center gap-5 normal-case tracking-normal">
           {voiceMode === "browser" && (
             <VoicePicker
+              compact
               value={voiceChoice}
               onChange={(name) => {
                 setVoiceChoice(name);
@@ -206,145 +261,165 @@ export default function InterviewScreen({
               }}
             />
           )}
-          <button type="button" onClick={onExit} className="uppercase tracking-widest hover:text-neutral-200">
+          <button
+            type="button"
+            onClick={onExit}
+            className="text-[10px] uppercase tracking-[0.3em] transition-colors hover:text-neutral-200"
+          >
             New interview
           </button>
         </div>
-      </div>
+      </header>
 
       {!stt.supported && (
-        <div className="rounded-md border border-amber-800 bg-amber-950/40 p-3 text-sm text-amber-200">
-          Voice answers need Chrome or Edge (this browser doesn&apos;t support speech recognition). You
-          can still type your answers below.
+        <div className="mx-5 border border-signal/30 px-4 py-2 text-center text-xs text-neutral-300">
+          Voice answers need Chrome or Edge. You can still type your answers below.
         </div>
       )}
 
-      {/* Transcript */}
-      <div className="flex flex-1 flex-col gap-4 overflow-y-auto rounded-md border border-neutral-800 p-4">
-        {messages.map((m, i) => (
-          <Line key={i} role={m.role} text={m.content} />
-        ))}
-        {turn === "interviewer" &&
-          (streamingText ? (
-            <Line role="assistant" text={streamingText} />
-          ) : (
-            <p className="text-sm text-neutral-500">Interviewer is thinking…</p>
-          ))}
-        {(stt.listening || processing) && (
-          <Line role="user" text={stt.transcript || "…"} live />
-        )}
+      {/* Centrepiece: the trace and status readout */}
+      <main className="flex min-h-0 flex-1 flex-col items-center justify-center">
+        <div className="h-[33vh] max-h-80 min-h-32 w-full">
+          <Oscilloscope mode={traceMode} level={level} />
+        </div>
+        <div aria-live="polite" className="mt-6 text-[11px] uppercase tracking-[0.4em] text-signal/60">
+          {status}
+        </div>
+        <p
+          className={`mt-4 min-h-[3.5em] max-w-xl px-6 text-center text-sm leading-relaxed ${
+            stt.listening || processing ? "text-neutral-400" : "text-neutral-500"
+          }`}
+        >
+          {caption}
+        </p>
+      </main>
+
+      {/* Controls */}
+      <section className="flex flex-col items-center gap-4 px-5 pb-6">
         {turn === "error" && (
-          <div className="rounded-md border border-red-900 bg-red-950/40 p-3 text-sm text-red-300">
-            <p>{error}</p>
-            <button type="button" onClick={retry} className="mt-2 underline">
+          <div className="flex flex-col items-center gap-3 text-center">
+            <p className="max-w-md text-sm text-signal">{error}</p>
+            <button
+              type="button"
+              onClick={retry}
+              className="border border-signal/60 px-5 py-2 text-[11px] uppercase tracking-[0.3em] text-signal transition-colors hover:bg-signal hover:text-void"
+            >
               Try again
             </button>
           </div>
         )}
-        <div ref={bottomRef} />
-      </div>
 
-      {(notice || stt.error) && <p className="text-sm text-amber-300">{stt.error ?? notice}</p>}
-
-      {turn === "complete" ? (
-        <div className="flex items-center gap-3">
+        {turn === "complete" && (
           <button
             type="button"
-            className="rounded-md bg-white px-5 py-2 text-sm font-medium text-black"
             onClick={() => alert("The feedback report is built in Phase 4.")}
+            className="border border-signal px-6 py-3 text-[11px] uppercase tracking-[0.35em] text-signal shadow-[0_0_24px_rgba(255,26,26,0.15)] transition-colors hover:bg-signal hover:text-void"
           >
             Get feedback
           </button>
-          <span className="text-sm text-neutral-500">Interview complete.</span>
-        </div>
-      ) : (
-        <>
-          {turn === "interviewer" && speaking && (
-            <button
-              type="button"
-              onClick={skip}
-              className="self-center rounded border border-neutral-700 px-3 py-1 text-xs uppercase tracking-widest text-neutral-400 hover:text-neutral-100"
-            >
-              Skip (Space)
-            </button>
-          )}
-          {stt.supported && (
-            <div className="flex flex-col items-center gap-2">
-              <button
-                type="button"
-                onClick={() => void toggleMic()}
-                disabled={!canAnswer}
-                aria-pressed={stt.listening}
-                aria-label={stt.listening ? "Stop and send answer" : "Start answering"}
-                className={`flex h-20 w-20 items-center justify-center rounded-full border-2 text-xs uppercase tracking-widest transition disabled:cursor-not-allowed disabled:opacity-30 ${
-                  stt.listening ? "border-red-500 bg-red-600 text-white" : "border-red-500 text-red-400"
-                }`}
-              >
-                {stt.listening ? "Stop" : "Talk"}
-              </button>
-              <span className="text-xs text-neutral-500">
-                Tap or press Space to {stt.listening ? "stop and send" : "start answering"}
-              </span>
-            </div>
-          )}
+        )}
 
-          {/* Text fallback, in case the mic doesn't work */}
-          <form
-            className="flex flex-col gap-2"
-            onSubmit={(e) => {
-              e.preventDefault();
-              submitAnswer(draft);
-            }}
-          >
-            <textarea
-              className="min-h-20 resize-y rounded-md border border-neutral-800 bg-neutral-950 p-3 text-sm leading-relaxed outline-none focus:border-neutral-500 disabled:opacity-50"
-              placeholder={
-                stt.listening
-                  ? "Listening… tap Stop (or press Space) to send"
-                  : turn === "interviewer"
-                  ? speaking
-                    ? "Interviewer speaking…"
-                    : "Interviewer thinking…"
-                  : canAnswer
-                  ? stt.supported
-                    ? "…or type your answer (Enter to send)"
-                    : "Type your answer (Enter to send, Shift+Enter for a new line)"
-                  : "Processing…"
-              }
-              value={draft}
-              maxLength={LIMITS.answerMaxChars}
-              disabled={!canAnswer || stt.listening}
-              onChange={(e) => setDraft(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && !e.shiftKey) {
+        {(turn === "interviewer" || turn === "candidate") && (
+          <>
+            <div className="grid grid-cols-[6rem_auto_6rem] items-center gap-6">
+              <div className="flex justify-end">
+                {turn === "interviewer" && speaking && (
+                  <button
+                    type="button"
+                    onClick={skip}
+                    className="text-[10px] uppercase tracking-[0.3em] text-neutral-500 transition-colors hover:text-signal"
+                  >
+                    Skip
+                  </button>
+                )}
+              </div>
+              {stt.supported ? (
+                <MicButton
+                  active={stt.listening}
+                  busy={processing}
+                  disabled={!canAnswer}
+                  onClick={() => void toggleMic()}
+                />
+              ) : (
+                <div className="h-20 w-20" />
+              )}
+              <div />
+            </div>
+            <div className="h-4 text-[10px] uppercase tracking-[0.25em] text-neutral-600">{hint}</div>
+
+            {textOpen && (
+              <form
+                className="flex w-full max-w-2xl items-end gap-3"
+                onSubmit={(e) => {
                   e.preventDefault();
                   submitAnswer(draft);
-                }
-              }}
-            />
-            <button
-              type="submit"
-              disabled={!canAnswer || stt.listening || !draft.trim()}
-              className="self-end rounded-md bg-white px-5 py-2 text-sm font-medium text-black disabled:cursor-not-allowed disabled:opacity-40"
-            >
-              Send answer
-            </button>
-          </form>
-        </>
-      )}
-    </div>
-  );
-}
+                }}
+              >
+                <textarea
+                  rows={2}
+                  className="min-h-12 flex-1 resize-none border border-neutral-800 bg-transparent px-3 py-2 text-sm leading-relaxed text-neutral-200 outline-none transition-colors placeholder:text-neutral-600 focus:border-signal/50 disabled:opacity-40"
+                  placeholder={
+                    stt.listening
+                      ? "Listening… tap the mic (or press Space) to send"
+                      : turn === "interviewer"
+                        ? speaking
+                          ? "Interviewer speaking…"
+                          : "Interviewer thinking…"
+                        : canAnswer
+                          ? "Type your answer (Enter to send, Shift+Enter for a new line)"
+                          : "Processing…"
+                  }
+                  value={draft}
+                  maxLength={LIMITS.answerMaxChars}
+                  disabled={!canAnswer || stt.listening}
+                  onChange={(e) => setDraft(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && !e.shiftKey) {
+                      e.preventDefault();
+                      submitAnswer(draft);
+                    }
+                  }}
+                />
+                <button
+                  type="submit"
+                  disabled={!canAnswer || stt.listening || !draft.trim()}
+                  className="h-12 border border-signal/60 px-4 text-[10px] uppercase tracking-[0.3em] text-signal transition-colors hover:bg-signal hover:text-void disabled:cursor-not-allowed disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-signal"
+                >
+                  Send
+                </button>
+              </form>
+            )}
+          </>
+        )}
 
-function Line({ role, text, live }: { role: ChatMessage["role"]; text: string; live?: boolean }) {
-  return (
-    <div className="text-sm leading-relaxed">
-      <span className={role === "assistant" ? "text-red-400" : "text-neutral-400"}>
-        {role === "assistant" ? "INTERVIEWER" : "YOU"}
-      </span>
-      <p className={`mt-1 whitespace-pre-wrap ${live ? "text-neutral-400 italic" : "text-neutral-100"}`}>
-        {text}
-      </p>
+        <div className="flex gap-6 text-[10px] uppercase tracking-[0.3em] text-neutral-600">
+          {stt.supported && (turn === "interviewer" || turn === "candidate") && (
+            <button
+              type="button"
+              onClick={() => setTypingOpen((o) => !o)}
+              className="transition-colors hover:text-neutral-300"
+            >
+              {typingOpen ? "Hide keyboard" : "Type instead"}
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => setShowTranscript((o) => !o)}
+            aria-expanded={showTranscript}
+            className="transition-colors hover:text-neutral-300"
+          >
+            {showTranscript ? "Hide transcript" : "Show transcript"}
+          </button>
+        </div>
+      </section>
+
+      {showTranscript && (
+        <aside className="max-h-[38vh] overflow-y-auto border-t border-neutral-900 px-5 py-5">
+          <div className="mx-auto max-w-2xl">
+            <Transcript lines={transcriptLines} typed={typed} />
+          </div>
+        </aside>
+      )}
     </div>
   );
 }

@@ -8,6 +8,12 @@
 // to browser speech immediately.
 
 import { splitLongSentence } from "../sentences";
+import {
+  AnalyserAmplitude,
+  MaxAmplitude,
+  SimulatedSpeechAmplitude,
+  type AmplitudeSource,
+} from "../viz/amplitude";
 import { DEFAULT_VOICE, resolveVoice, waitForVoices, type VoiceName } from "./voices";
 
 export type SpeakerMode = "elevenlabs" | "browser";
@@ -24,6 +30,12 @@ export class Speaker {
   readonly ctx: AudioContext;
   /** ElevenLabs playback runs through this node (usable for a real-audio visualiser). */
   readonly analyser: AnalyserNode;
+  /**
+   * Interviewer loudness for the visualiser: simulated from utterance events for
+   * browser speech, real (AnalyserNode) for ElevenLabs. Whichever is active wins.
+   */
+  readonly amplitude: AmplitudeSource;
+  private simulated = new SimulatedSpeechAmplitude();
 
   mode: SpeakerMode = "browser";
   voiceChoice: VoiceName = DEFAULT_VOICE;
@@ -45,6 +57,7 @@ export class Speaker {
     this.analyser = this.ctx.createAnalyser();
     this.analyser.fftSize = 2048;
     this.analyser.connect(this.ctx.destination);
+    this.amplitude = new MaxAmplitude([this.simulated, new AnalyserAmplitude(this.analyser)]);
   }
 
   /** Loads browser voices and asks the server whether ElevenLabs is configured. */
@@ -95,6 +108,7 @@ export class Speaker {
       /* already stopped */
     }
     if (typeof speechSynthesis !== "undefined") speechSynthesis.cancel();
+    this.simulated.utteranceEnd();
     this.finishRun();
   }
 
@@ -197,10 +211,18 @@ export class Speaker {
         u.lang = "en-GB";
       }
       u.rate = 0.95;
+      // Drive the visualiser from utterance events (no audio stream is exposed).
+      u.onstart = () => this.simulated.utteranceStart(text, u.rate);
+      u.onboundary = (e) => {
+        if (e.name !== "word") return;
+        const len = e.charLength || text.slice(e.charIndex).search(/\s|$/);
+        this.simulated.wordBoundary(text.slice(e.charIndex, e.charIndex + len));
+      };
       // Chrome occasionally never fires onend; a generous timeout keeps the queue moving.
-      const timeout = setTimeout(resolve, 3000 + text.length * 120);
+      const timeout = setTimeout(() => done(), 3000 + text.length * 120);
       const done = () => {
         clearTimeout(timeout);
+        this.simulated.utteranceEnd();
         resolve();
       };
       u.onend = done;

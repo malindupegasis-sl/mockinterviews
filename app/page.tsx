@@ -12,7 +12,7 @@ export default function Home() {
   const [sessionId, setSessionId] = useState(0);
 
   return (
-    <main className="flex min-h-dvh flex-col items-center px-4 py-10">
+    <main className="min-h-dvh">
       {config ? (
         <InterviewScreen key={sessionId} config={config} onExit={() => setConfig(null)} />
       ) : (

@@ -2,14 +2,14 @@
 
 Voice-based mock interview practice. You describe the interview you're preparing for, an AI interviewer asks you questions out loud one at a time (with follow-ups), you answer by voice, and at the end you get a structured feedback report.
 
-**Status: Phase 2 (voice).** Visual design, the feedback report and guardrails come in later phases.
+**Status: Phase 3 (visual design).** The feedback report and guardrails come in later phases.
 
 ## Stack
 
 - Next.js (App Router, TypeScript, Tailwind)
 - Anthropic API (`claude-sonnet-5-5`), called only from server-side API routes
 - Speech-to-text: browser Web Speech API (`en-GB`), so **use Chrome or Edge**
-- Text-to-speech: ElevenLabs streaming API via a server route, with the browser's built-in `speechSynthesis` as a fallback
+- Text-to-speech: the browser's `speechSynthesis` (Chrome's Google UK English Male / Female voices) by default. ElevenLabs streaming via a server route is still supported, and is used only if both ElevenLabs env vars are set
 
 ## Local setup
 
@@ -28,9 +28,28 @@ Open http://localhost:3000 in Chrome or Edge and allow microphone access when as
 - **Answering:** tap the round mic button (or press **Space**) to start talking, and tap again (or press **Space**) to stop. Your answer is sent when you stop, and your words appear live while you speak.
 - The mic is disabled while the interviewer is speaking.
 - **Typing instead:** the text box under the mic always works, in case the mic doesn't. Enter sends.
-- **Voice:** if ElevenLabs isn't configured, or a request to it fails, the app switches to your browser's built-in voice. A "Browser voice" picker then appears in the top bar (English GB/US voices), and your choice is remembered.
+- **Interrupting:** press **Space** or tap **Skip** while the interviewer is speaking to cut them off and take your turn.
+- **Voice:** choose *Google UK English Male* (default) or *Female* on the setup screen or in the top bar. Your choice is remembered. These voices exist only in Chrome. In other browsers the app uses another en-GB (or English) voice and shows "For the best voice, use Chrome."
+- **Transcript:** hidden by default. Use **Show transcript** at the bottom, and lines type out as they arrive.
 
-## Choosing an ElevenLabs voice (deep, calm, American male)
+## The visualiser
+
+The red trace in the middle shows whose turn it is:
+
+| State | Trace | Status readout |
+|---|---|---|
+| Waiting for you | flat line, slow breathing glow | YOUR TURN |
+| Interviewer thinking | flat line, gentle brightness pulse | PROCESSING |
+| Interviewer speaking | bright red waveform following the speech | SPEAKING |
+| You speaking | dimmer, desaturated waveform driven by your mic | LISTENING |
+
+Browser speech exposes no audio stream, so the interviewer's waveform is driven by a **simulated amplitude** (`lib/viz/amplitude.ts`). Each word makes a pulse with a quick rise and a decay. The pulses are timed from the utterance's `boundary` events, or estimated from the text when the voice doesn't fire them (Chrome's Google voices may not). If ElevenLabs is turned on, a real `AnalyserNode` on the playback drives it instead. Both are plugged in through the same `AmplitudeSource` interface. With *reduce motion* enabled in your OS, the trace is a static glowing line.
+
+## Optional: ElevenLabs voices
+
+Browser speech is the default. To use ElevenLabs instead, set **both** `ELEVENLABS_API_KEY` and `ELEVENLABS_VOICE_ID`. If a sentence fails, it's retried once. Auth or quota errors switch to browser speech immediately.
+
+### Choosing an ElevenLabs voice (deep, calm, American male)
 
 1. Sign in at [elevenlabs.io](https://elevenlabs.io) and open **Voices → Voice Library** (sometimes labelled "Explore").
 2. Filter by **Gender: Male**, **Accent: American**, and **Age: Middle-aged** or **Old** (these tend to sound deeper). Category filters such as *Narrative & Story*, *Conversational* or *Informative & Educational* tend to produce calm, even delivery. You can also search for words like "deep", "calm" or "baritone".
@@ -70,9 +89,14 @@ Voice settings and the model (`eleven_flash_v2_5`, chosen for low latency) are i
 | `lib/speech/Speaker.ts` | Ordered TTS playback queue + browser-voice fallback. |
 | `lib/speech/useSpeechRecognition.ts` | Push-to-talk speech recognition hook. |
 | `lib/completion.ts` | Detects and hides the `[INTERVIEW_COMPLETE]` token. |
-| `components/InterviewScreen.tsx` | Interview UI: transcript, mic button, text fallback. |
+| `lib/speech/voices.ts` | Google UK voice options, loading, and fallback selection. |
+| `lib/viz/amplitude.ts` | Amplitude sources: simulated speech, AnalyserNode, mic. |
+| `components/Oscilloscope.tsx` | Canvas trace (60fps, glow, persistence, reduced motion). |
+| `components/Transcript.tsx` | Typewriter transcript drawer. |
+| `components/MicButton.tsx` | Ring-style push-to-talk button. |
+| `components/InterviewScreen.tsx` | Interview UI: trace, status, controls, transcript. |
 | `components/SetupForm.tsx` | Setup screen (context + number of questions). |
-| `components/VoicePicker.tsx` | Browser-voice picker for the fallback. |
+| `components/VoicePicker.tsx` | Voice picker (Google UK English Male / Female). |
 
 ## Environment variables
 
@@ -81,7 +105,7 @@ See `.env.example`.
 | Variable | Needed from | Notes |
 |---|---|---|
 | `ANTHROPIC_API_KEY` | Phase 1 | Required. |
-| `ELEVENLABS_API_KEY` | Phase 2 | Optional: without it the browser voice is used. |
-| `ELEVENLABS_VOICE_ID` | Phase 2 | Optional: see "Choosing an ElevenLabs voice". |
+| `ELEVENLABS_API_KEY` | Phase 2 | Optional. ElevenLabs is used only if both of these are set. |
+| `ELEVENLABS_VOICE_ID` | Phase 2 | Optional. See "Choosing an ElevenLabs voice". |
 | `ACCESS_CODE` | Phase 5 | |
 | `UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN` | Phase 5 | Optional. |

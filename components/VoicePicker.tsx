@@ -17,10 +17,13 @@ export default function VoicePicker({
   value,
   onChange,
   className = "",
+  compact = false,
 }: {
   value: VoiceName;
   onChange: (name: VoiceName) => void;
   className?: string;
+  /** Hide the "Voice" label on narrow screens and use short option names. */
+  compact?: boolean;
 }) {
   // null until the browser has loaded its voice list.
   const [options, setOptions] = useState<VoiceName[] | null>(null);
@@ -41,16 +44,18 @@ export default function VoicePicker({
 
   if (options === null) return null;
   if (options.length === 0)
-    return <p className={`text-xs text-neutral-500 ${className}`}>For the best voice, use Chrome.</p>;
+    return <p className={`text-[11px] text-neutral-500 ${className}`}>For the best voice, use Chrome.</p>;
 
   // If the saved choice isn't available here, show the voice that will actually be used.
   const selected = options.includes(value) ? value : options[0];
 
   return (
-    <label className={`flex items-center gap-2 text-xs text-neutral-400 ${className}`}>
-      Voice
+    <label className={`flex items-center gap-4 ${className}`}>
+      <span className={`text-[10px] uppercase tracking-[0.3em] text-neutral-500 ${compact ? "hidden sm:inline" : ""}`}>
+        Voice
+      </span>
       <select
-        className="rounded border border-neutral-700 bg-neutral-950 px-2 py-1 text-neutral-200"
+        className="border border-neutral-800 bg-void px-2 py-1.5 text-xs text-neutral-200 outline-none transition-colors focus:border-signal/50"
         value={selected}
         onChange={(e) => {
           const name = e.target.value as VoiceName;
@@ -60,7 +65,7 @@ export default function VoicePicker({
       >
         {options.map((name) => (
           <option key={name} value={name}>
-            {name}
+            {compact ? name.replace("Google UK English ", "UK ") : name}
           </option>
         ))}
       </select>

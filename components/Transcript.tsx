@@ -1,7 +1,14 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { ChatMessage } from "@/lib/types";
+import type { Role } from "@/lib/types";
+
+export interface TranscriptLine {
+  role: Role;
+  content: string;
+  /** Optional divider shown above the line, e.g. "Question 2 · Attempt 1". */
+  label?: string;
+}
 import { useReducedMotion } from "@/lib/viz/useReducedMotion";
 
 const CHARS_PER_SECOND = 40;
@@ -15,7 +22,7 @@ export default function Transcript({
   lines,
   typed,
 }: {
-  lines: ChatMessage[];
+  lines: TranscriptLine[];
   typed: Map<number, number>;
 }) {
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -27,6 +34,12 @@ export default function Transcript({
       {lines.length === 0 && <p className="text-neutral-600">Nothing yet.</p>}
       {lines.map((line, i) => (
         <div key={i}>
+          {line.label && (
+            <div className="mb-4 mt-2 flex items-center gap-3 text-[10px] uppercase tracking-[0.3em] text-neutral-600">
+              <span>{line.label}</span>
+              <span className="h-px flex-1 bg-neutral-900" />
+            </div>
+          )}
           <div
             className={`mb-1 text-[10px] uppercase tracking-[0.25em] ${
               line.role === "assistant" ? "text-signal/70" : "text-neutral-500"

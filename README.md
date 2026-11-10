@@ -2,7 +2,7 @@
 
 Voice-based mock interview practice. You describe the interview you're preparing for, an AI interviewer asks you questions out loud one at a time (with follow-ups), you answer by voice, and at the end you get a structured feedback report.
 
-**Status: Phase 3 (visual design).** The feedback report and guardrails come in later phases.
+**Status: Phase 4 (feedback report).** Guardrails and deployment come in Phase 5.
 
 ## Stack
 
@@ -24,6 +24,15 @@ npm run dev
 Open http://localhost:3000 in Chrome or Edge and allow microphone access when asked. (Browsers only allow the mic on `localhost` or HTTPS.)
 
 ## Using it
+
+**Setup:** describe the interview (role, company, job description, interview type, seniority). You can also paste your background or CV, which the interviewer uses privately to ask sharper follow-ups; it's never read back. Then pick a mode:
+
+- **Full interview:** uninterrupted, with the full report at the end.
+- **Practice:** the interview pauses after each question (once its follow-ups are done) and shows a feedback card: score /5, what worked, the biggest weakness, what a stronger answer would include, and a short rewrite that uses only what you said. Choose **Retry this question** (earlier attempts stay in the transcript, labelled by attempt) or **Next question**. At the end you can still get the full report, based on your final attempt at each question.
+
+Question 1 is always a "tell me about yourself / walk me through your background" variant.
+
+**Feedback report** (after **Get feedback**): an overall score /10 and a two-sentence verdict; per question, a one-line summary, score /5, the biggest weakness, what a stronger answer would include, and your actual answer (collapsed); a rewrite of your weakest answer using only facts you stated; and the top three patterns to fix. Use **Copy report**, **Practise again with the same context**, or **New interview**. Feedback isn't spoken aloud.
 
 - **Answering:** tap the round mic button (or press **Space**) to start talking, and tap again (or press **Space**) to stop. Your answer is sent when you stop, and your words appear live while you speak.
 - The mic is disabled while the interviewer is speaking.
@@ -80,7 +89,7 @@ Voice settings and the model (`eleven_flash_v2_5`, chosen for low latency) are i
 
 | Path | What it does |
 |---|---|
-| `lib/prompts.ts` | **All system prompts.** Edit here to change interviewer behaviour. |
+| `lib/prompts.ts` | **All system prompts** (interviewer, per-question feedback, full report) and the practice-mode control messages. |
 | `app/api/interview/route.ts` | Validates the request, sends the transcript + system prompt to Claude, streams the reply back as plain text. |
 | `app/api/tts/route.ts` | `GET`: is ElevenLabs configured? `POST`: proxies ElevenLabs streaming TTS (audio/mpeg). |
 | `lib/tts.ts` | ElevenLabs model and voice settings. |
@@ -88,14 +97,18 @@ Voice settings and the model (`eleven_flash_v2_5`, chosen for low latency) are i
 | `lib/sentences.ts` | Splits streaming text into sentences. |
 | `lib/speech/Speaker.ts` | Ordered TTS playback queue + browser-voice fallback. |
 | `lib/speech/useSpeechRecognition.ts` | Push-to-talk speech recognition hook. |
-| `lib/completion.ts` | Detects and hides the `[INTERVIEW_COMPLETE]` token. |
+| `lib/completion.ts` | Detects and hides the `[INTERVIEW_COMPLETE]` and `[QUESTION_COMPLETE]` tokens. |
 | `lib/speech/voices.ts` | Google UK voice options, loading, and fallback selection. |
 | `lib/viz/amplitude.ts` | Amplitude sources: simulated speech, AnalyserNode, mic. |
 | `components/Oscilloscope.tsx` | Canvas trace (60fps, glow, persistence, reduced motion). |
 | `components/Transcript.tsx` | Typewriter transcript drawer. |
 | `components/MicButton.tsx` | Ring-style push-to-talk button. |
 | `components/InterviewScreen.tsx` | Interview UI: trace, status, controls, transcript. |
-| `components/SetupForm.tsx` | Setup screen (context + number of questions). |
+| `components/SetupForm.tsx` | Setup screen: context, CV, mode, number of questions, voice. |
+| `app/api/feedback/route.ts` | Per-question and full-report feedback, as structured JSON (schema-constrained). |
+| `lib/feedbackClient.ts` | Browser helpers for `/api/feedback`. |
+| `components/QuestionFeedbackCard.tsx` | Practice-mode feedback card. |
+| `components/ReportScreen.tsx` | Full feedback report. |
 | `components/VoicePicker.tsx` | Voice picker (Google UK English Male / Female). |
 
 ## Environment variables
@@ -109,3 +122,7 @@ See `.env.example`.
 | `ELEVENLABS_VOICE_ID` | Phase 2 | Optional. See "Choosing an ElevenLabs voice". |
 | `ACCESS_CODE` | Phase 5 | |
 | `UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN` | Phase 5 | Optional. |
+
+## Model settings
+
+Both routes use `claude-sonnet-5-5` (`lib/anthropic.ts`). The interviewer runs at `effort: "low"` for fast conversational turns. Feedback runs at `effort: "high"`, because quality matters more than speed there, so a report can take up to a minute.

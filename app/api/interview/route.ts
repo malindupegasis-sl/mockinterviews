@@ -1,7 +1,12 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { anthropic, MODEL } from "@/lib/anthropic";
-import { interviewerSystemPrompt, OPENING_USER_MESSAGE } from "@/lib/prompts";
-import { LIMITS, type ChatMessage } from "@/lib/types";
+import {
+  CONTROL_PREFIX,
+  controlMessage,
+  interviewerSystemPrompt,
+  OPENING_USER_MESSAGE,
+} from "@/lib/prompts";
+import { LIMITS, type Control, type InterviewMode } from "@/lib/types";
 
 // Allow long-ish streams on Vercel.
 export const maxDuration = 60;
@@ -10,44 +15,72 @@ function bad(message: string, status = 400) {
   return Response.json({ error: message }, { status });
 }
 
-/** Validates the request body; returns an error string or the parsed values. */
-function parseBody(body: unknown):
-  | { error: string }
-  | { context: string; numQuestions: number; messages: ChatMessage[] } {
+interface Parsed {
+  context: string;
+  cv: string;
+  numQuestions: number;
+  mode: InterviewMode;
+  messages: Anthropic.MessageParam[];
+}
+
+/** Validates the request body and builds the API messages; returns an error string on failure. */
+function parseBody(body: unknown): { error: string } | Parsed {
   if (!body || typeof body !== "object") return { error: "Invalid JSON body." };
-  const { context, numQuestions, messages } = body as Record<string, unknown>;
+  const { context, cv = "", numQuestions, mode = "full", messages } = body as Record<string, unknown>;
 
   if (typeof context !== "string" || !context.trim())
     return { error: "Interview context is required." };
   if (context.length > LIMITS.contextMaxChars)
     return { error: `Context must be at most ${LIMITS.contextMaxChars} characters.` };
+  if (typeof cv !== "string" || cv.length > LIMITS.cvMaxChars)
+    return { error: `Background must be at most ${LIMITS.cvMaxChars} characters.` };
+  if (mode !== "full" && mode !== "practice") return { error: "Invalid mode." };
 
   const n = Number(numQuestions);
   if (!Number.isInteger(n) || n < LIMITS.minQuestions || n > LIMITS.maxQuestions)
     return { error: `Number of questions must be ${LIMITS.minQuestions}–${LIMITS.maxQuestions}.` };
 
-  if (!Array.isArray(messages)) return { error: "messages must be an array." };
+  if (!Array.isArray(messages) || messages.length > LIMITS.maxTranscriptTurns)
+    return { error: "Invalid messages." };
+
+  const out: Anthropic.MessageParam[] = [{ role: "user", content: OPENING_USER_MESSAGE }];
   for (const [i, m] of messages.entries()) {
-    if (
-      !m ||
-      (m.role !== "user" && m.role !== "assistant") ||
-      typeof m.content !== "string" ||
-      m.content.length > LIMITS.answerMaxChars
-    )
-      return { error: `Invalid message at index ${i}.` };
     // The client transcript starts with the interviewer and alternates from there.
     const expected = i % 2 === 0 ? "assistant" : "user";
-    if (m.role !== expected) return { error: "Messages must alternate, starting with the interviewer." };
+    if (!m || m.role !== expected) return { error: "Messages must alternate, starting with the interviewer." };
+
+    if (m.control) {
+      // Practice-mode control turn: the text is generated here, never taken from the client.
+      const c = m.control as Control;
+      if (
+        mode !== "practice" ||
+        m.role !== "user" ||
+        !["next", "retry", "finish"].includes(c.type) ||
+        !Number.isInteger(c.question) ||
+        c.question < 1 ||
+        c.question > n
+      )
+        return { error: `Invalid control message at index ${i}.` };
+      out.push({ role: "user", content: controlMessage(c, n) });
+      continue;
+    }
+
+    if (typeof m.content !== "string" || !m.content.trim() || m.content.length > LIMITS.answerMaxChars)
+      return { error: `Invalid message at index ${i}.` };
+    // Candidates can't impersonate the practice app.
+    const content =
+      m.role === "user" ? m.content.split(CONTROL_PREFIX).join("").trim() || "(no answer)" : m.content;
+    out.push({ role: m.role, content });
   }
   if (messages.length > 0 && messages[messages.length - 1].role !== "user")
-    return { error: "The last message must be the candidate's answer." };
+    return { error: "The last message must be from the candidate." };
 
-  return { context: context.trim(), numQuestions: n, messages: messages as ChatMessage[] };
+  return { context: context.trim(), cv: cv.trim(), numQuestions: n, mode, messages: out };
 }
 
 /**
  * POST /api/interview
- * Body: { context, numQuestions, messages } where messages is the visible transcript.
+ * Body: { context, cv?, numQuestions, mode?, messages } (messages = visible transcript + control turns).
  * Streams the interviewer's next turn back as plain UTF-8 text.
  */
 export async function POST(req: Request) {
@@ -59,16 +92,13 @@ export async function POST(req: Request) {
   }
   const parsed = parseBody(body);
   if ("error" in parsed) return bad(parsed.error);
-  const { context, numQuestions, messages } = parsed;
+  const { context, cv, numQuestions, mode, messages } = parsed;
 
   const stream = anthropic.messages.stream({
     model: MODEL,
     max_tokens: 4000,
-    system: interviewerSystemPrompt({ context, numQuestions }),
-    messages: [
-      { role: "user", content: OPENING_USER_MESSAGE },
-      ...messages.map((m) => ({ role: m.role, content: m.content })),
-    ],
+    system: interviewerSystemPrompt({ context, cv, numQuestions, mode }),
+    messages,
     // Low effort: conversational turns, so skip deep thinking and keep latency down.
     output_config: { effort: "low" },
     // Cache the stable prefix (system prompt + earlier turns) across turns.

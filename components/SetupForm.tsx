@@ -2,20 +2,26 @@
 
 import { useState } from "react";
 import { loadVoiceChoice, type VoiceName } from "@/lib/speech/voices";
-import { LIMITS } from "@/lib/types";
+import { LIMITS, type InterviewConfig, type InterviewMode } from "@/lib/types";
 import Oscilloscope from "./Oscilloscope";
 import VoicePicker from "./VoicePicker";
 
-export interface InterviewConfig {
-  context: string;
-  numQuestions: number;
-}
+export type { InterviewConfig };
 
-const PLACEHOLDER = `e.g. Senior Product Manager at Monzo. Behavioural + product sense interview, second round.
+const CONTEXT_PLACEHOLDER = `e.g. Senior Product Manager at Monzo. Behavioural + product sense interview, second round.
 
 Job description: Own the savings product roadmap, work with design and engineering, define success metrics...`;
 
+const CV_PLACEHOLDER = `Optional. Paste your CV or a summary of your experience. The interviewer uses it to ask sharper follow-ups, but never reads it back.`;
+
+const MODES: { value: InterviewMode; title: string; blurb: string }[] = [
+  { value: "full", title: "Full interview", blurb: "Uninterrupted. Full report at the end." },
+  { value: "practice", title: "Practice", blurb: "Feedback after each question. Retry as needed." },
+];
+
 const label = "text-[10px] uppercase tracking-[0.3em] text-neutral-500";
+const field =
+  "resize-y border border-neutral-800 bg-transparent p-4 text-sm leading-relaxed text-neutral-200 outline-none transition-colors placeholder:text-neutral-700 focus:border-signal/50";
 
 export default function SetupForm({
   initial,
@@ -25,15 +31,16 @@ export default function SetupForm({
   onStart: (config: InterviewConfig) => void;
 }) {
   const [context, setContext] = useState(initial?.context ?? "");
-  const [numQuestions, setNumQuestions] = useState(
-    initial?.numQuestions ?? LIMITS.defaultQuestions,
-  );
+  const [cv, setCv] = useState(initial?.cv ?? "");
+  const [numQuestions, setNumQuestions] = useState(initial?.numQuestions ?? LIMITS.defaultQuestions);
+  const [mode, setMode] = useState<InterviewMode>(initial?.mode ?? "full");
   const [voice, setVoice] = useState<VoiceName>(() => loadVoiceChoice());
 
   const trimmed = context.trim();
   const valid =
     trimmed.length > 0 &&
     context.length <= LIMITS.contextMaxChars &&
+    cv.length <= LIMITS.cvMaxChars &&
     numQuestions >= LIMITS.minQuestions &&
     numQuestions <= LIMITS.maxQuestions;
 
@@ -48,7 +55,7 @@ export default function SetupForm({
         className="mx-auto flex w-full max-w-2xl flex-1 flex-col gap-8 px-5 pb-12 pt-4"
         onSubmit={(e) => {
           e.preventDefault();
-          if (valid) onStart({ context: trimmed, numQuestions });
+          if (valid) onStart({ context: trimmed, cv: cv.trim(), numQuestions, mode });
         }}
       >
         <header className="space-y-3">
@@ -62,20 +69,56 @@ export default function SetupForm({
         <label className="flex flex-col gap-3">
           <span className={label}>Interview context</span>
           <textarea
-            className="min-h-60 resize-y border border-neutral-800 bg-transparent p-4 text-sm leading-relaxed text-neutral-200 outline-none transition-colors placeholder:text-neutral-700 focus:border-signal/50"
+            className={`min-h-52 ${field}`}
             value={context}
             onChange={(e) => setContext(e.target.value)}
             maxLength={LIMITS.contextMaxChars}
-            placeholder={PLACEHOLDER}
+            placeholder={CONTEXT_PLACEHOLDER}
             required
           />
-          <span className="flex justify-between gap-4 text-[11px] text-neutral-600">
-            <span>Role, company, job description, interview type, seniority</span>
-            <span className={context.length > LIMITS.contextMaxChars * 0.9 ? "text-signal/80" : ""}>
-              {context.length}/{LIMITS.contextMaxChars}
-            </span>
-          </span>
+          <Counter hint="Role, company, job description, interview type, seniority" n={context.length} max={LIMITS.contextMaxChars} />
         </label>
+
+        <label className="flex flex-col gap-3">
+          <span className={label}>
+            Your background / CV <span className="normal-case tracking-normal text-neutral-700">(optional)</span>
+          </span>
+          <textarea
+            className={`min-h-32 ${field}`}
+            value={cv}
+            onChange={(e) => setCv(e.target.value)}
+            maxLength={LIMITS.cvMaxChars}
+            placeholder={CV_PLACEHOLDER}
+          />
+          <Counter hint="Used privately for follow-ups and feedback" n={cv.length} max={LIMITS.cvMaxChars} />
+        </label>
+
+        <fieldset className="flex flex-col gap-3">
+          <legend className={`${label} mb-3`}>Mode</legend>
+          <div className="grid gap-3 sm:grid-cols-2">
+            {MODES.map((m) => (
+              <label
+                key={m.value}
+                className={`cursor-pointer border px-4 py-3 transition-colors ${
+                  mode === m.value ? "border-signal/70" : "border-neutral-800 hover:border-neutral-600"
+                }`}
+              >
+                <input
+                  type="radio"
+                  name="mode"
+                  value={m.value}
+                  checked={mode === m.value}
+                  onChange={() => setMode(m.value)}
+                  className="sr-only"
+                />
+                <span className={`block text-xs uppercase tracking-[0.25em] ${mode === m.value ? "text-signal" : "text-neutral-300"}`}>
+                  {m.title}
+                </span>
+                <span className="mt-1 block text-xs text-neutral-500">{m.blurb}</span>
+              </label>
+            ))}
+          </div>
+        </fieldset>
 
         <div className="flex flex-wrap items-center gap-x-10 gap-y-5">
           <label className="flex items-center gap-4">
@@ -101,5 +144,16 @@ export default function SetupForm({
         </button>
       </form>
     </div>
+  );
+}
+
+function Counter({ hint, n, max }: { hint: string; n: number; max: number }) {
+  return (
+    <span className="flex justify-between gap-4 text-[11px] text-neutral-600">
+      <span>{hint}</span>
+      <span className={n > max * 0.9 ? "text-signal/80" : ""}>
+        {n}/{max}
+      </span>
+    </span>
   );
 }

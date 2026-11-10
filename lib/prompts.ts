@@ -113,7 +113,9 @@ export function renderDirective(d: Directive, numQuestions: number): string {
     case "closing":
       return d.after === "answer"
         ? `That was the final question. Give a brief neutral acknowledgement, then: ${CLOSING}`
-        : `All questions are done. ${CLOSING}`;
+        : d.after === "cap"
+          ? `The interview has reached its time limit, so it ends now even though not every question was asked. Give a brief neutral acknowledgement, say you're out of time, then: ${CLOSING}`
+          : `All questions are done. ${CLOSING}`;
     case "ack":
       return `Say only "Thank you."`; // not sent to the model; kept for completeness
     case "hard_decide":

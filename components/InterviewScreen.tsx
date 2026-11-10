@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { ApiError } from "@/lib/api";
 import { fetchQuestionFeedback, visibleTurns } from "@/lib/feedbackClient";
 import { streamInterviewerTurn } from "@/lib/interviewClient";
 import { SentenceSplitter } from "@/lib/sentences";
@@ -22,6 +23,9 @@ import VoicePicker from "./VoicePicker";
  * "review" is the practice-mode pause after a question.
  */
 type Turn = "interviewer" | "candidate" | "review" | "complete" | "error";
+
+const SORRY_RETRY_ANSWER = "Sorry, something went wrong. Try that answer again.";
+const SORRY = "Sorry, something went wrong. Try again.";
 
 /** One attempt at one main question, derived from the server's turn metadata. */
 interface Attempt {
@@ -180,8 +184,37 @@ export default function InterviewScreen({
         if (controller.signal.aborted) return;
         speaker.stop();
         setStreamingText("");
-        setError(err instanceof Error ? err.message : "Something went wrong.");
-        setTurn("error");
+        const status = err instanceof ApiError ? err.status : 0;
+        if (err instanceof ApiError && err.code === "access") return; // the access screen takes over
+
+        // Not a transient failure (daily limit, unverifiable history, server not configured):
+        // show the server's message as-is.
+        if (status === 429 || status === 409 || status === 503 || status === 400) {
+          setError(err instanceof Error ? err.message : SORRY);
+          setTurn("error");
+          return;
+        }
+
+        // API failure: say so out loud. If it happened after an answer, withdraw that
+        // answer and give the turn back so the candidate can try it again.
+        const last = history[history.length - 1];
+        const retryAnswer = last?.role === "user" && !last.control;
+        console.warn("[interview] turn failed:", err instanceof Error ? err.message : err);
+        speaker.beginTurn();
+        speaker.enqueue(retryAnswer ? SORRY_RETRY_ANSWER : SORRY);
+        if (retryAnswer) {
+          setMessages(history.slice(0, -1));
+          setDraft(last.content); // kept in the type box in case they typed it
+          setNotice(SORRY_RETRY_ANSWER);
+        }
+        await speaker.waitUntilIdle();
+        if (controller.signal.aborted) return;
+        if (retryAnswer) {
+          setTurn("candidate");
+        } else {
+          setError(SORRY);
+          setTurn("error");
+        }
       }
     },
     [config.context, config.cv, config.numQuestions, config.mode, config.difficulty, practice, loadFeedback],

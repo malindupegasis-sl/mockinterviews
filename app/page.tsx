@@ -1,9 +1,11 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useSyncExternalStore } from "react";
+import AccessGate from "@/components/AccessGate";
 import InterviewScreen, { type FinishedInterview } from "@/components/InterviewScreen";
 import ReportScreen from "@/components/ReportScreen";
 import SetupForm from "@/components/SetupForm";
+import { hasAccessCode, subscribeAccess } from "@/lib/api";
 import type { InterviewConfig } from "@/lib/types";
 
 type View =
@@ -12,6 +14,8 @@ type View =
   | { name: "report"; config: InterviewConfig; finished: FinishedInterview };
 
 export default function Home() {
+  // The access code lives in sessionStorage; on the server (and before hydration) we assume none.
+  const unlocked = useSyncExternalStore(subscribeAccess, hasAccessCode, () => false);
   const [view, setView] = useState<View>({ name: "setup" });
   // Remember the last setup so "New interview" pre-fills the form.
   const [lastConfig, setLastConfig] = useState<InterviewConfig | undefined>();
@@ -23,6 +27,15 @@ export default function Home() {
     setSessionId((n) => n + 1);
     setView({ name: "interview", config });
   };
+
+  // No code, or the server rejected it: show the access screen.
+  if (!unlocked) {
+    return (
+      <main className="min-h-dvh">
+        <AccessGate />
+      </main>
+    );
+  }
 
   return (
     <main className="min-h-dvh">

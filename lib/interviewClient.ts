@@ -1,3 +1,4 @@
+import { apiFetch, throwApiError } from "./api";
 import type { InterviewEvent, InterviewRequest, TurnMeta } from "./types";
 
 /**
@@ -10,25 +11,17 @@ export async function streamInterviewerTurn(
   onText: (soFar: string) => void,
   signal?: AbortSignal,
 ): Promise<{ text: string; meta: TurnMeta }> {
-  const res = await fetch("/api/interview", {
+  const res = await apiFetch("/api/interview", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(req),
     signal,
   });
 
-  if (!res.ok || !res.body) {
-    let message = `Request failed (${res.status}).`;
-    try {
-      const data = await res.json();
-      if (data?.error) message = data.error;
-    } catch {
-      /* non-JSON error body */
-    }
-    throw new Error(message);
-  }
+  if (!res.ok || !res.body) await throwApiError(res, `Request failed (${res.status}).`);
+  const body = res.body!;
 
-  const reader = res.body.getReader();
+  const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
   let text = "";

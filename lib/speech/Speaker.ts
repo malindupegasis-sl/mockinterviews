@@ -7,6 +7,7 @@
 // Audio. A failed ElevenLabs sentence is retried once; auth/quota errors switch
 // to browser speech immediately.
 
+import { apiFetch } from "../api";
 import { splitLongSentence } from "../sentences";
 import {
   AnalyserAmplitude,
@@ -63,7 +64,7 @@ export class Speaker {
   /** Loads browser voices and asks the server whether ElevenLabs is configured. */
   async init(): Promise<SpeakerMode> {
     const [configured, voices] = await Promise.all([
-      fetch("/api/tts")
+      apiFetch("/api/tts")
         .then((r) => r.json())
         .then((d) => Boolean(d?.configured))
         .catch(() => false),
@@ -128,7 +129,7 @@ export class Speaker {
     for (let attempt = 1; attempt <= 2; attempt++) {
       if (this.mode !== "elevenlabs") return null; // already switched by another sentence
       try {
-        const res = await fetch("/api/tts", {
+        const res = await apiFetch("/api/tts", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ text, previousText }),

@@ -1,4 +1,6 @@
 import { connection } from "next/server";
+import { requireAccess } from "@/lib/server/access";
+import { rateLimit } from "@/lib/server/ratelimit";
 import {
   ELEVENLABS_MODEL_ID,
   ELEVENLABS_VOICE_SETTINGS,
@@ -7,8 +9,10 @@ import {
 } from "@/lib/tts";
 
 /** GET /api/tts → { configured } so the client knows whether to use browser speech instead. */
-export async function GET() {
+export async function GET(req: Request) {
   await connection(); // read env vars at request time, not at build time
+  const denied = requireAccess(req);
+  if (denied) return denied;
   return Response.json({ configured: elevenLabsConfig() !== null });
 }
 
@@ -18,8 +22,12 @@ export async function GET() {
  * pipes the MP3 audio straight through to the browser. The API key never leaves the server.
  */
 export async function POST(req: Request) {
+  const denied = requireAccess(req);
+  if (denied) return denied;
   const config = elevenLabsConfig();
   if (!config) return Response.json({ error: "ElevenLabs is not configured." }, { status: 503 });
+  const limited = await rateLimit(req, "tts");
+  if (limited) return limited;
 
   let text: unknown, previousText: unknown;
   try {
@@ -56,13 +64,14 @@ export async function POST(req: Request) {
       signal: req.signal,
     });
   } catch (err) {
-    console.error("[tts] ElevenLabs request failed:", err);
+    console.error("[tts] ElevenLabs request failed:", err instanceof Error ? err.message : "unknown error");
     return Response.json({ error: "Text-to-speech failed." }, { status: 502 });
   }
 
   if (!upstream.ok || !upstream.body) {
     const detail = await upstream.text().catch(() => "");
-    console.error("[tts] ElevenLabs error:", upstream.status, detail);
+    // ElevenLabs error bodies describe the account/request problem, not the spoken text.
+    console.error("[tts] ElevenLabs error:", upstream.status, detail.slice(0, 200));
     // Tell the client whether retrying could help: auth and quota errors won't fix themselves.
     const quota = upstream.status === 402 || /quota|credits|payment/i.test(detail);
     if (quota) return Response.json({ error: "ElevenLabs quota exceeded.", code: "quota" }, { status: 402 });

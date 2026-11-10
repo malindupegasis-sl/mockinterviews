@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { loadVoiceChoice, type VoiceName } from "@/lib/speech/voices";
 import { LIMITS, type Difficulty, type InterviewConfig, type InterviewMode } from "@/lib/types";
+import { Footer } from "./AccessGate";
 import Oscilloscope from "./Oscilloscope";
 import VoicePicker from "./VoicePicker";
 
@@ -118,14 +119,18 @@ export default function SetupForm({
           <VoicePicker value={voice} onChange={setVoice} />
         </div>
 
-        <button
-          type="submit"
-          disabled={!valid}
-          className="self-start border border-signal px-6 py-3 text-[11px] uppercase tracking-[0.35em] text-signal transition-colors hover:bg-signal hover:text-void disabled:cursor-not-allowed disabled:border-neutral-800 disabled:text-neutral-700 disabled:hover:bg-transparent"
-        >
-          Start interview
-        </button>
+        <div className="flex flex-wrap items-center gap-x-6 gap-y-3">
+          <button
+            type="submit"
+            disabled={!valid}
+            className="border border-signal px-6 py-3 text-[11px] uppercase tracking-[0.35em] text-signal transition-colors hover:bg-signal hover:text-void disabled:cursor-not-allowed disabled:border-neutral-800 disabled:text-neutral-700 disabled:hover:bg-transparent"
+          >
+            Start interview
+          </button>
+          <p className="text-xs text-neutral-500">Nothing you enter is saved.</p>
+        </div>
       </form>
+      <Footer />
     </div>
   );
 }

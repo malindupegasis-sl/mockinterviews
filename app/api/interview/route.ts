@@ -3,6 +3,10 @@ import { anthropic, MODEL } from "@/lib/anthropic";
 import { buildApiMessages, metaForDecision, planNextTurn, validateHistory, type FlowConfig } from "@/lib/interviewFlow";
 import { JsonStringFieldStream } from "@/lib/jsonStream";
 import { interviewerSystemPrompt } from "@/lib/prompts";
+import { requireAccess } from "@/lib/server/access";
+import { describeError } from "@/lib/server/log";
+import { rateLimit } from "@/lib/server/ratelimit";
+import { signingConfigured, signTurn, verifyHistory } from "@/lib/server/turnSigning";
 import { LIMITS, type ChatMessage, type Difficulty, type InterviewEvent, type TurnMeta } from "@/lib/types";
 
 // Allow long-ish streams on Vercel.
@@ -43,6 +47,13 @@ const NDJSON_HEADERS = {
  * model speaks, then one { type: "done", text, meta } with the turn's metadata.
  */
 export async function POST(req: Request) {
+  const denied = requireAccess(req);
+  if (denied) return denied;
+  if (!signingConfigured()) {
+    console.error("[interview] TURN_SECRET is not set: refusing requests. Set it in the Vercel project settings.");
+    return bad("This app isn't configured yet.", 503);
+  }
+
   let body: Record<string, unknown>;
   try {
     body = await req.json();
@@ -65,16 +76,31 @@ export async function POST(req: Request) {
   if (invalid) return bad(invalid);
   const history = messages as ChatMessage[];
 
+  // Only accept turn records this server signed, for these exact settings.
+  const tampered = verifyHistory(history, cfg);
+  if (tampered) {
+    console.warn(`[interview] rejected history: ${tampered}`);
+    return bad("This interview's history couldn't be verified. Please start a new interview.", 409);
+  }
+
   const plan = planNextTurn(history, cfg);
   if ("error" in plan) return bad(plan.error, 409);
+
+  // Per-IP limits: new interviews per day, and interviewer turns per day.
+  const limited =
+    (history.length === 0 ? await rateLimit(req, "interviews") : null) ?? (await rateLimit(req, "turns"));
+  if (limited) return limited;
+
+  const index = history.length; // where the new interviewer turn will sit
 
   // Practice-mode acknowledgement: fixed text, no model call.
   if (plan.kind === "fixed") {
     logTurn(cfg, plan.meta);
+    const meta = signTurn(plan.meta, plan.text, index, history, cfg);
     const stream = new ReadableStream<Uint8Array>({
       start(c) {
         c.enqueue(line({ type: "text", text: plan.text }));
-        c.enqueue(line({ type: "done", text: plan.text, meta: plan.meta }));
+        c.enqueue(line({ type: "done", text: plan.text, meta }));
         c.close();
       },
     });
@@ -119,7 +145,8 @@ export async function POST(req: Request) {
           }
         }
         const final = await stream.finalMessage();
-        if (final.stop_reason === "refusal") console.warn("[interview] Model refused:", final.stop_details);
+        if (final.stop_reason === "refusal")
+          console.warn(`[interview] model declined (category: ${final.stop_details?.category ?? "unknown"})`);
 
         let meta: TurnMeta;
         if (plan.kind === "decide") {
@@ -137,7 +164,8 @@ export async function POST(req: Request) {
           meta = plan.meta;
         }
         logTurn(cfg, meta);
-        controller.enqueue(line({ type: "done", text: spoken.trim(), meta }));
+        const text = spoken.trim();
+        controller.enqueue(line({ type: "done", text, meta: signTurn(meta, text, index, history, cfg) }));
         controller.close();
       } catch (err) {
         console.error("[interview] Stream error:", describeError(err));
@@ -152,17 +180,11 @@ export async function POST(req: Request) {
   return new Response(out, { headers: NDJSON_HEADERS });
 }
 
-/** One line per interviewer turn in the server log (useful when testing difficulty rules). */
+/** One line per interviewer turn in the server log. Contains no user text. */
 function logTurn(cfg: FlowConfig, meta: TurnMeta) {
-  if (process.env.NODE_ENV === "production") return;
   console.info(
     `[interview] ${cfg.difficulty}/${cfg.mode} q${meta.question}/${cfg.numQuestions} ${meta.kind}` +
       ` follow-ups=${meta.followUps} directive=${meta.directive.type}` +
       (meta.action ? ` action=${meta.action}${meta.forced ? " (forced)" : ""}` : ""),
   );
-}
-
-function describeError(err: unknown) {
-  if (err instanceof Anthropic.APIError) return `${err.status ?? "?"} ${err.name}: ${err.message} (request id: ${err.requestID ?? "n/a"})`;
-  return err;
 }

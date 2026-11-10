@@ -17,7 +17,7 @@ export type Directive =
   | { type: "ask"; question: number; after: "answer" | "next" } // main question N
   | { type: "retry"; question: number } // practice: re-ask the same question
   | { type: "follow_up"; question: number } // exactly one follow-up
-  | { type: "closing"; after: "answer" | "next" } // closing line
+  | { type: "closing"; after: "answer" | "next" | "cap" } // closing line ("cap": turn limit reached)
   | { type: "ack" } // practice: fixed "Thank you." (no model call)
   | { type: "hard_decide"; question: number; followUps: number; then: "ask_next" | "closing" | "ack" }; // Hard: model chooses
 
@@ -32,6 +32,9 @@ export interface TurnMeta {
   /** Hard mode only: the model's structured decision, and whether the server forced it. */
   action?: "follow_up" | "question_done";
   forced?: boolean;
+  /** Interview id and HMAC signature, added by the server (see lib/server/turnSigning.ts). */
+  iid?: string;
+  sig?: string;
 }
 
 /** One turn in the conversation. Control turns are hidden from the transcript. */
@@ -103,4 +106,6 @@ export const LIMITS = {
   maxQuestions: 15,
   defaultQuestions: 6,
   maxTranscriptTurns: 120,
+  /** Spoken turns (interviewer + candidate) before the interview is wrapped up. */
+  maxTurns: 40,
 } as const;

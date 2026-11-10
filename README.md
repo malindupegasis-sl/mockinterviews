@@ -2,7 +2,7 @@
 
 Voice-based mock interview practice. You describe the interview you're preparing for, an AI interviewer asks you questions out loud one at a time (with follow-ups), you answer by voice, and at the end you get a structured feedback report.
 
-**Status: Phase 4 (feedback report).** Guardrails and deployment come in Phase 5.
+**Status: Phase 5 (guardrails and deployment).** Access code, rate limits, signed interview state, privacy-safe logging. Deployment steps are below.
 
 ## Stack
 
@@ -22,6 +22,8 @@ npm run dev
 ```
 
 Open http://localhost:3000 in Chrome or Edge and allow microphone access when asked. (Browsers only allow the mic on `localhost` or HTTPS.)
+
+Locally, only `ANTHROPIC_API_KEY` is required. If `ACCESS_CODE` is unset, any code (even an empty one) gets you in. If `TURN_SECRET` is unset, a built-in development secret is used. The terminal warns about both. In production both are **required**: without them the API refuses requests.
 
 ## Using it
 
@@ -116,6 +118,13 @@ Voice settings and the model (`eleven_flash_v2_5`, chosen for low latency) are i
 | `lib/interviewFlow.ts` | **Interview structure:** state from turn metadata, difficulty rules, next step, API message building. |
 | `lib/jsonStream.ts` | Streams a string field out of JSON as it arrives (Hard-mode spoken text). |
 | `components/DebugStrip.tsx` | Dev-only state readout. |
+| `lib/server/access.ts` | Access-code check used by every API route. |
+| `lib/server/ratelimit.ts` | Per-IP daily limits (Upstash REST, or in-memory fallback). |
+| `lib/server/turnSigning.ts` | HMAC signing and verification of interview turn records. |
+| `lib/server/log.ts` | Privacy-safe error descriptions for logs. |
+| `lib/api.ts` | Browser helper: sends the access code, handles a rejected code. |
+| `app/api/access/route.ts` | Checks an access code (rate-limited). |
+| `components/AccessGate.tsx` | Access-code screen and the "Best in Chrome." footer. |
 | `lib/speech/voices.ts` | Google UK voice options, loading, and fallback selection. |
 | `lib/viz/amplitude.ts` | Amplitude sources: simulated speech, AnalyserNode, mic. |
 | `components/Oscilloscope.tsx` | Canvas trace (60fps, glow, persistence, reduced motion). |
@@ -131,15 +140,56 @@ Voice settings and the model (`eleven_flash_v2_5`, chosen for low latency) are i
 
 ## Environment variables
 
-See `.env.example`.
-
-| Variable | Needed from | Notes |
+| Variable | Required? | What it's for |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | Phase 1 | Required. |
-| `ELEVENLABS_API_KEY` | Phase 2 | Optional. ElevenLabs is used only if both of these are set. |
-| `ELEVENLABS_VOICE_ID` | Phase 2 | Optional. See "Choosing an ElevenLabs voice". |
-| `ACCESS_CODE` | Phase 5 | |
-| `UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN` | Phase 5 | Optional. |
+| `ANTHROPIC_API_KEY` | **Yes** | Claude API key, from the Claude Console → API keys. |
+| `ACCESS_CODE` | **Yes (production)** | The code people type to use the app. Change it to cut off access (see below). |
+| `TURN_SECRET` | **Yes (production)** | Random secret (16+ characters) used to sign interview state. Generate with `openssl rand -base64 32`. Changing it invalidates interviews in progress. |
+| `ELEVENLABS_API_KEY`, `ELEVENLABS_VOICE_ID` | No | ElevenLabs voice instead of browser speech (both must be set). |
+| `UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN` | No | Durable rate limiting. `KV_REST_API_URL` / `KV_REST_API_TOKEN` (Vercel's Upstash integration) also work. |
+
+## Guardrails and privacy
+
+- **Access code:** every API route checks `ACCESS_CODE` on the server. The browser keeps the code in `sessionStorage`, so it's forgotten when the tab closes.
+- **Rate limits (per IP, per UTC day):** 5 new interviews, 300 interviewer turns, 60 feedback requests, 1,500 ElevenLabs sentences, and 20 wrong access codes per hour. With Upstash configured the counts are shared and durable. Without it they're kept in memory per server instance, so they reset on restart and aren't shared (a warning is logged). IP addresses are stored only as salted hashes.
+- **Turn cap:** an interview never exceeds 40 spoken turns. Close to the cap, the interviewer wraps up and says you're out of time.
+- **Signed interview state:** the server is stateless. Each interviewer turn carries a record (question number, follow-ups used, turn type) signed with HMAC-SHA256 using `TURN_SECRET`. The signature also covers the difficulty, mode, question count, the turn's text and position, and the previous signature. The server rejects any history that doesn't verify, so the browser can't change question counts or difficulty, or edit, insert or reorder interviewer turns.
+- **Errors:** if a model call fails after an answer, the app says and shows "Sorry, something went wrong. Try that answer again.", withdraws the answer, and gives you the turn back.
+- **Privacy:** nothing is stored server-side. There's no database, and request bodies are never logged. The `[interview]` and `[feedback]` log lines contain only counts, timings, statuses and request ids, never the context, CV, questions or answers. API error messages that could echo request content are left out of the logs. Prompts and answers are sent to Anthropic (and spoken text to ElevenLabs, if configured) to generate responses.
+
+## Deploying to Vercel
+
+### 1. Get the code on GitHub
+The code lives at `github.com/malindupegasis-sl/mockinterviews`. After local changes:
+```bash
+git add -A && git commit -m "Describe the change" && git push
+```
+Once the project is imported (step 2), Vercel redeploys automatically on every push to `main`.
+
+### 2. Import the project
+1. Go to vercel.com and sign up with **Continue with GitHub** (the free **Hobby** plan is fine).
+2. **Add New… → Project**, find `mockinterviews` and click **Import**. If it isn't listed, use **Adjust GitHub App Permissions** to give Vercel access to that repo.
+3. Leave the framework preset as **Next.js** and the build settings as default.
+4. Open **Environment Variables** and add `ANTHROPIC_API_KEY`, `ACCESS_CODE` and `TURN_SECRET` (plus any optional ones from the table above).
+5. Click **Deploy**. After a minute or two you get a URL like `mockinterviews-xxxx.vercel.app`. That's the app.
+
+### 3. Optional: durable rate limits with Upstash
+In the Vercel project, open **Storage** (or the **Marketplace**), add **Upstash Redis** (free tier) and connect it to this project. That adds `KV_REST_API_URL` / `KV_REST_API_TOKEN` automatically. Redeploy. Alternatively, create a database at upstash.com and paste its REST URL and token as `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN`.
+
+### 4. Set a monthly spend limit in the Claude Console
+In the Claude Console (platform.claude.com), go to **Settings → Limits** (on some accounts **Settings → Billing**), find **Spend limits**, and set a monthly limit you're comfortable with. When it's reached, Claude API calls fail (the log shows a 400 mentioning the limit) until the next month or until you raise it. Consider a separate API key just for this app (**API keys → Create key**) so you can revoke it independently. If you use ElevenLabs, its plan has its own monthly character quota.
+
+### 5. Cut off access: change `ACCESS_CODE`
+Vercel → your project → **Settings → Environment Variables** → edit `ACCESS_CODE` → save. Environment changes apply only to new deployments, so go to **Deployments**, open the ⋯ menu on the latest one and choose **Redeploy**. Everyone using the old code is sent back to the access screen on their next request. To shut the app off completely, set `ACCESS_CODE` to a long random value nobody has, or revoke the Anthropic API key in the Claude Console.
+
+### 6. Check usage
+- **Claude API spend:** Claude Console → **Usage** (tokens and cost by day and model). Interview turns are small, and feedback reports are the bigger calls.
+- **Vercel:** project → **Usage** for function invocations and duration. Project → **Logs** for the `[interview]` / `[feedback]` / `[ratelimit]` lines.
+- **Upstash** (if used): the database page shows command counts.
+- **ElevenLabs** (if used): the subscription page shows characters used.
+
+### Function time limits
+On the Hobby plan Vercel functions can run for up to 300 seconds (also the default). The routes declare their own limits: `/api/interview` 60 s (one streamed turn) and `/api/feedback` 120 s (a full report at high effort usually takes well under a minute). Both are within the Hobby limit, so no effort changes were needed.
 
 ## Model settings
 
@@ -153,12 +203,14 @@ Every feedback request prints `[feedback]` lines in the terminal running `npm ru
 |---|---|
 | `[feedback] full report: reviewing 14 turns (medium)…` | Request started. |
 | `[feedback] full report OK in 24.1s (input …, output … tokens)` | Success. |
-| `[feedback] … FAILED …: Anthropic API 401 AuthenticationError …` | Bad or missing `ANTHROPIC_API_KEY`. Check `.env.local` and restart the dev server. |
-| `… FAILED …: Anthropic API 429 RateLimitError …` | Rate limited or out of credit. Wait, or check your Anthropic console. |
-| `… FAILED …: Anthropic API 400 BadRequestError …` | The request was rejected. The message says why. Include the request id if you report it. |
+| `[feedback] … FAILED …: Anthropic API 401 authentication_error …` | Bad or missing `ANTHROPIC_API_KEY`. Check `.env.local` (or the Vercel env vars), then restart or redeploy. |
+| `… FAILED …: Anthropic API 429 rate_limit_error …` | Anthropic rate limit. Wait a minute. |
+| `… FAILED …: Anthropic API 400 invalid_request_error …` | The request was rejected. If the message mentions a spend limit or credit, see "Set a monthly spend limit". Otherwise note the request id. |
 | `… FAILED …: Anthropic API connection APIConnectionError …` | No network route to the Anthropic API. |
 | `… UNUSABLE …: hit max_tokens before finishing` | The report was too long to finish. Try fewer questions. |
 | `… UNUSABLE …: model declined (…)` | The model refused (rare). The category is shown in brackets. |
 | `… cancelled after …s (the browser left the page)` | You navigated away mid-review. Harmless. |
+| `[ratelimit] feedback limit reached for one client` | That IP hit the daily feedback limit. |
+| `[access] ACCESS_CODE is not set…` / `[interview] TURN_SECRET is not set…` | Add the missing environment variable in Vercel and redeploy. |
 
 If nothing prints at all, the browser never reached `/api/feedback`. Check the browser console and Network tab.

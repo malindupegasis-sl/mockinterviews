@@ -1,6 +1,9 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { anthropic, MODEL } from "@/lib/anthropic";
 import { fullFeedbackSystemPrompt, questionFeedbackSystemPrompt } from "@/lib/prompts";
+import { requireAccess } from "@/lib/server/access";
+import { describeError } from "@/lib/server/log";
+import { rateLimit } from "@/lib/server/ratelimit";
 import { LIMITS, type Difficulty, type FullReport, type QuestionFeedback, type Role } from "@/lib/types";
 
 // Feedback runs at higher effort than the interviewer: quality over speed.
@@ -120,10 +123,14 @@ function buildInput(opts: {
  * Body: { kind: "question" | "full", context, cv?, difficulty?, transcript, practice? }
  * Returns QuestionFeedback or FullReport as JSON.
  *
- * Every request logs one "[feedback]" line to the server terminal: how long it
- * took and the token usage on success, or the reason on failure.
+ * Every request logs "[feedback]" lines to the server terminal: how long it took
+ * and the token usage on success, or the reason on failure. No user text is logged,
+ * and nothing is stored.
  */
 export async function POST(req: Request) {
+  const denied = requireAccess(req);
+  if (denied) return denied;
+
   let body: Record<string, unknown>;
   try {
     body = await req.json();
@@ -151,6 +158,9 @@ export async function POST(req: Request) {
   )
     return bad("Invalid transcript.");
   if (!transcript.some((t) => t.role === "user")) return bad("There are no answers to review yet.");
+
+  const limited = await rateLimit(req, "feedback");
+  if (limited) return limited;
 
   const level = difficulty as Difficulty;
   const input = buildInput({ context, cv, transcript, practice: Boolean(practice) });
@@ -202,15 +212,11 @@ export async function POST(req: Request) {
       console.info(`[feedback] ${label}: cancelled after ${secs()} (the browser left the page)`);
       return bad("Cancelled.", 499);
     }
+    console.error(`[feedback] ${label} FAILED after ${secs()}: ${describeError(err)}`);
     if (err instanceof Anthropic.APIError) {
-      console.error(
-        `[feedback] ${label} FAILED after ${secs()}: Anthropic API ${err.status ?? "connection"} ${err.name}: ${err.message}` +
-          ` (request id: ${err.requestID ?? "n/a"})`,
-      );
       const status = err.status && err.status < 500 ? err.status : 502;
       return bad("Feedback is unavailable right now. Please try again.", status);
     }
-    console.error(`[feedback] ${label} FAILED after ${secs()} (unexpected error):`, err);
     return bad("Feedback is unavailable right now. Please try again.", 502);
   }
 }
@@ -224,7 +230,7 @@ function logUnusable(label: string, time: string, stopReason: string | null, det
     stopReason === "max_tokens"
       ? "hit max_tokens before finishing"
       : stopReason === "refusal"
-        ? `model declined (${JSON.stringify(details)})`
+        ? `model declined (category: ${(details as { category?: string } | null)?.category ?? "unknown"})`
         : extra ?? `stop_reason=${stopReason}, output was not valid JSON`;
   console.error(`[feedback] ${label} UNUSABLE after ${time}: ${why}`);
 }

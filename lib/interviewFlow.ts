@@ -49,7 +49,7 @@ function validDirective(d: unknown, n: number): d is Directive {
     case "follow_up":
       return isInt(x.question, 1, n);
     case "closing":
-      return x.after === "answer" || x.after === "next";
+      return x.after === "answer" || x.after === "next" || x.after === "cap";
     case "hard_decide":
       return isInt(x.question, 1, n) && isInt(x.followUps, 0, 1) && ["ask_next", "closing", "ack"].includes(x.then as string);
     default:
@@ -99,6 +99,17 @@ export function planNextTurn(messages: ChatMessage[], cfg: FlowConfig): Plan | {
   const q = prev.question;
   const f = prev.followUps;
 
+  if (prev.kind === "closing") return { error: "The interview has ended." };
+
+  // Turn cap: count spoken turns (not practice button presses or fixed acknowledgements).
+  // If a normal turn now would leave no room for the closing line within the cap
+  // (it would need an answer and then the closing: 3 more turns), wrap up instead.
+  const spoken = messages.filter((m) => !m.control && m.meta?.directive.type !== "ack").length;
+  if (spoken + 3 > LIMITS.maxTurns) {
+    const directive: Directive = { type: "closing", after: "cap" };
+    return { kind: "model", directive, meta: { kind: "closing", question: q, followUps: f, directive } };
+  }
+
   // Practice-mode buttons: only valid while paused after a question.
   if (last.control) {
     if (prev.kind !== "ack") return { error: "Next/Retry is only available after a question is finished." };
@@ -116,7 +127,6 @@ export function planNextTurn(messages: ChatMessage[], cfg: FlowConfig): Plan | {
 
   // The candidate answered.
   if (prev.kind === "ack") return { error: "The question is finished. Choose Next question or Retry." };
-  if (prev.kind === "closing") return { error: "The interview has ended." };
 
   /** The current question is finished: pause (practice), ask the next one, or close. */
   const done = (extra: Partial<TurnMeta> = {}): Plan => {
